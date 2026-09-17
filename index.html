@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Budget Übersicht</title>
+<meta name="theme-color" content="#a9752f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Budget">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-topbar">
+  <header class="app-header">
+    <h1>Budget Übersicht</h1>
+    <div class="month-nav">
+      <button id="prevMonth" aria-label="Vorheriger Monat">‹</button>
+      <span id="currentMonthLabel"></span>
+      <button id="nextMonth" aria-label="Nächster Monat">›</button>
+    </div>
+  </header>
+
+  <div class="tab-bar" id="tabBar" role="tablist" aria-label="Bereiche">
+    <button type="button" class="tab-btn" id="tab-overview" data-panel="panel-overview"
+            role="tab" aria-selected="true" aria-controls="panel-overview">
+      <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="16" x2="4" y2="10"/><line x1="10" y1="16" x2="10" y2="5"/><line x1="16" y1="16" x2="16" y2="12"/></svg>
+      <span class="tab-label">Übersicht</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-history" data-panel="panel-history"
+            role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">
+      <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.5" width="14" height="12" rx="2"/><line x1="3" y1="8" x2="17" y2="8"/><line x1="7" y1="2.5" x2="7" y2="5.5"/><line x1="13" y1="2.5" x2="13" y2="5.5"/></svg>
+      <span class="tab-label">Verlauf</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-review" data-panel="panel-review"
+            role="tab" aria-selected="false" aria-controls="panel-review" tabindex="-1">
+      <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><line x1="16.5" y1="16.5" x2="12.7" y2="12.7"/></svg>
+      <span class="tab-label">Prüfen</span><span class="tab-badge" id="reviewTabBadge" hidden>0</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-transactions" data-panel="panel-transactions"
+            role="tab" aria-selected="false" aria-controls="panel-transactions" tabindex="-1">
+      <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5h10v15l-2-1.3-1.5 1.3-1.5-1.3-1.5 1.3-1.5-1.3-2 1.3z"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10.5" x2="13" y2="10.5"/></svg>
+      <span class="tab-label">Ausgaben</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-teach" data-panel="panel-teach"
+            role="tab" aria-selected="false" aria-controls="panel-teach" tabindex="-1">
+      <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H8l-4 3v-3H5a2 2 0 0 1-2-2z"/></svg>
+      <span class="tab-label">Assistent</span>
+    </button>
+  </div>
+</div>
+
+<main>
+  <section class="dashboard tab-panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <div class="hero-card" id="heroCard">
+      <span class="hero-label">Ausgaben total</span>
+      <div class="hero-figure">
+        <span class="hero-currency" id="heroCurrency">CHF</span>
+        <span class="hero-value" id="heroValue">0.00</span>
+      </div>
+      <div class="hero-delta" id="heroDelta" hidden>
+        <span class="hero-delta-icon" id="heroDeltaIcon" aria-hidden="true"></span>
+        <span id="heroDeltaText"></span>
+      </div>
+      <p class="hero-nodata" id="heroNoData" hidden>Noch keine Vergleichsdaten aus dem Vormonat.</p>
+    </div>
+
+    <div class="stat-row">
+      <div class="card">
+        <span class="card-label">Grösste Kategorie</span>
+        <span class="card-value" id="topCategory">–</span>
+      </div>
+      <div class="card">
+        <span class="card-label">Einträge</span>
+        <span class="card-value" id="txCount">0</span>
+      </div>
+    </div>
+
+    <div class="dashboard-block goals-block">
+      <div class="section-header">
+        <h2>Budget-Ziele</h2>
+        <div class="header-actions">
+          <button id="goalsSettingsBtn" class="btn-secondary" aria-label="Budget-Ziele bearbeiten">
+            <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.8"/><path d="M10 3.5v2M10 14.5v2M16.5 10h-2M5.5 10h-2M14.6 5.4l-1.4 1.4M6.8 13.2l-1.4 1.4M14.6 14.6l-1.4-1.4M6.8 6.8L5.4 5.4"/></svg>
+            Ziele
+          </button>
+        </div>
+      </div>
+      <div id="goalList" class="goal-list"></div>
+      <p id="goalsEmptyState" class="empty-state" hidden>Noch keine Budget-Ziele gesetzt. <button type="button" id="goalsEmptyBtn" class="btn-link">+ Ziel festlegen</button></p>
+    </div>
+
+    <div class="dashboard-block categories-block">
+      <h2>Kategorien</h2>
+      <div id="categoryList" class="category-list"></div>
+    </div>
+  </section>
+
+  <section class="history-section tab-panel" id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <div class="section-header">
+      <h2>Verlauf</h2>
+      <div class="header-actions">
+        <button type="button" id="exportExcelBtn" class="btn-secondary">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10M6 9l4 4 4-4"/><path d="M3.5 15v1.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V15"/></svg>
+          Excel exportieren
+        </button>
+      </div>
+    </div>
+    <div id="historyList" class="history-list"></div>
+    <p id="historyEmptyState" class="empty-state" hidden>Noch keine Monate mit Ausgaben vorhanden.</p>
+  </section>
+
+  <section class="review-section tab-panel" id="panel-review" role="tabpanel" aria-labelledby="tab-review" hidden>
+    <div class="section-header">
+      <h2>Zu prüfen</h2>
+      <div class="header-actions">
+        <button type="button" id="categorizationLogBtn" class="btn-secondary" aria-label="Zuordnungsverlauf anzeigen">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10.5" r="6.5"/><path d="M10 7v3.5l2.5 1.5"/></svg>
+        </button>
+        <button type="button" id="startReviewSessionBtn" class="btn-primary">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l9 6-9 6z"/></svg>
+          Durchgehen
+        </button>
+      </div>
+    </div>
+    <p class="import-hint">Ausgaben aller Monate, die der Assistent nicht sicher zuordnen konnte.</p>
+    <div id="reviewQueueList" class="review-list"></div>
+    <p id="reviewQueueEmptyState" class="empty-state" hidden>Alles zugeordnet — nichts zu prüfen.</p>
+  </section>
+
+  <section class="transactions tab-panel" id="panel-transactions" role="tabpanel" aria-labelledby="tab-transactions" hidden>
+    <div class="section-header">
+      <h2>Ausgaben</h2>
+      <div class="header-actions">
+        <button id="importBtn" class="btn-secondary">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3M6 7l4-4 4 4"/><path d="M3.5 13v2.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V13"/></svg>
+          Excel
+        </button>
+        <button id="addBtn" class="btn-primary">+ Ausgabe</button>
+        <button id="clearMonthBtn" class="btn-secondary" aria-label="Alle Ausgaben dieses Monats löschen">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2M6 6l.7 9.2a1.5 1.5 0 0 0 1.5 1.3h3.6a1.5 1.5 0 0 0 1.5-1.3L14 6"/></svg>
+        </button>
+      </div>
+    </div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+    <p id="importSourceInfo" class="import-source-info" hidden></p>
+    <div id="transactionList" class="transaction-list"></div>
+    <p id="emptyState" class="empty-state" hidden>Noch keine Ausgaben für diesen Monat. Füge eine Ausgabe hinzu oder importiere dein Excel.</p>
+  </section>
+
+  <section class="teach-section tab-panel" id="panel-teach" role="tabpanel" aria-labelledby="tab-teach" hidden>
+    <div class="section-header"><h2>Lern-Assistent</h2></div>
+    <p class="teach-intro">Kein echter KI-Chat — ein einfacher Assistent, dem du beibringen kannst, welcher Händler zu welcher Kategorie gehört. Sag ihm z. B. „Aldi ist Verpflegung“, „Denner gehört zu Verpflegung“ oder „vergiss Aldi“.</p>
+
+    <div id="teachChatLog" class="teach-chat-log" aria-live="polite"></div>
+
+    <form id="teachForm" class="teach-form">
+      <input type="text" id="teachInput" placeholder="z. B. Aldi ist Verpflegung" autocomplete="off" required>
+      <button type="submit" class="btn-primary">Senden</button>
+    </form>
+
+    <div class="teach-rules">
+      <div class="teach-rules-header">Gelernte Regeln (<span id="teachRuleCount">0</span>)</div>
+      <div id="teachRulesList" class="teach-rules-list"></div>
+    </div>
+
+    <div class="backup-block">
+      <div class="section-header"><h2>Datensicherung</h2></div>
+      <p class="import-hint">Alle Daten liegen nur in diesem Browser. Regelmässig ein Backup speichern schützt vor Datenverlust — z. B. bei einem neuen Gerät oder gelöschten Browserdaten.</p>
+      <div class="header-actions">
+        <button type="button" id="exportBackupBtn" class="btn-secondary">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10M6 9l4 4 4-4"/><path d="M3.5 15v1.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V15"/></svg>
+          Backup herunterladen
+        </button>
+        <button type="button" id="importBackupBtn" class="btn-secondary">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3M6 7l4-4 4 4"/><path d="M3.5 13v2.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V13"/></svg>
+          Wiederherstellen
+        </button>
+      </div>
+      <input type="file" id="backupFileInput" accept=".json" hidden>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem('budget_active_tab');
+    if (!saved || saved === 'panel-overview') return;
+    var panel = document.getElementById(saved);
+    var btn = document.querySelector('.tab-btn[data-panel="' + saved + '"]');
+    if (!panel || !btn) return;
+    document.querySelectorAll('.tab-panel').forEach(function (p) { p.hidden = (p.id !== saved); });
+    document.querySelectorAll('.tab-btn').forEach(function (b) {
+      var active = b === btn;
+      b.setAttribute('aria-selected', String(active));
+      b.tabIndex = active ? 0 : -1;
+    });
+  } catch (e) {}
+})();
+</script>
+
+<div id="toast" class="toast" hidden></div>
+
+<dialog id="importDialog">
+  <div class="import-content">
+    <h2>Excel importieren</h2>
+    <p class="import-hint">Spalten prüfen und bei Bedarf anpassen, dann importieren.</p>
+    <div class="import-mapping">
+      <label>Datum-Spalte
+        <select id="mapDate"></select>
+      </label>
+      <label>Beschreibung-Spalte
+        <select id="mapDesc"></select>
+      </label>
+      <label>Betrag-Spalte
+        <select id="mapAmount"></select>
+      </label>
+      <label>Vorzeichen-Logik
+        <select id="mapSign">
+          <option value="negative">Negative Werte = Ausgabe (Standard)</option>
+          <option value="positive">Positive Werte = Ausgabe</option>
+          <option value="all">Alle Zeilen sind Ausgaben</option>
+        </select>
+      </label>
+    </div>
+    <div class="import-preview-wrap">
+      <p id="importSummary" class="import-summary"></p>
+      <table class="import-preview">
+        <thead>
+          <tr><th>Datum</th><th>Beschreibung</th><th>Betrag</th><th>Kategorie</th></tr>
+        </thead>
+        <tbody id="importPreviewBody"></tbody>
+      </table>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="importCancelBtn" class="btn-secondary">Abbrechen</button>
+      <button type="button" id="importConfirmBtn" class="btn-primary">Importieren</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="reviewDialog">
+  <div class="import-content">
+    <h2>Bitte prüfen</h2>
+    <p class="import-hint"><span id="reviewCount">0</span> Ausgabe(n) konnten nicht sicher zugeordnet werden. Kategorie wählen oder bestätigen — der Rest lässt sich jederzeit direkt in der Liste anpassen.</p>
+    <div id="reviewList" class="review-list"></div>
+    <div class="dialog-actions">
+      <button type="button" id="reviewDoneBtn" class="btn-primary">Fertig</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="reviewSessionDialog">
+  <div class="review-session-content">
+    <div class="review-session-header">
+      <div class="review-session-nav">
+        <button type="button" id="reviewUndoBtn" class="review-nav-btn" aria-label="Zurück (letzte Aktion rückgängig)" disabled>
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5L2.5 8l3.5 3.5"/><path d="M2.5 8h9a5 5 0 0 1 0 10h-2.5"/></svg>
+        </button>
+        <span id="reviewSessionProgress" class="review-session-progress"></span>
+        <button type="button" id="reviewRedoBtn" class="review-nav-btn" aria-label="Vorwärts (Aktion wiederholen)" disabled>
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M14 4.5L17.5 8l-3.5 3.5"/><path d="M17.5 8h-9a5 5 0 0 0 0 10h2.5"/></svg>
+        </button>
+      </div>
+      <button type="button" id="reviewSessionCloseBtn" class="btn-secondary" aria-label="Schliessen">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="5" x2="15" y2="15"/><line x1="15" y1="5" x2="5" y2="15"/></svg>
+      </button>
+    </div>
+
+    <div id="reviewCardStack" class="review-card-stack">
+      <div id="reviewCard" class="review-card">
+        <span id="reviewStampAccept" class="review-stamp review-stamp-accept">Übernehmen</span>
+        <span id="reviewStampSkip" class="review-stamp review-stamp-skip">Später</span>
+        <div class="review-card-body">
+          <p id="reviewCardDesc" class="review-card-desc"></p>
+          <p id="reviewCardMeta" class="review-card-meta"></p>
+          <span id="reviewCardCategory" class="review-card-category-badge"></span>
+        </div>
+      </div>
+    </div>
+
+    <p class="review-session-hint">Nach rechts ziehen = Vorschlag übernehmen · nach links = später · oder direkt eine Kategorie wählen</p>
+
+    <div id="reviewChipGrid" class="review-chip-grid"></div>
+
+    <div id="reviewSessionDone" class="review-session-done" hidden>
+      <p>Alle Karten durchgegangen.</p>
+      <button type="button" id="reviewSessionDoneBtn" class="btn-primary">Schliessen</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="categorizationLogDialog">
+  <div class="import-content">
+    <div class="section-header">
+      <h2>Zuordnungsverlauf</h2>
+      <div class="header-actions">
+        <button type="button" id="categorizationLogClearBtn" class="btn-secondary">Leeren</button>
+      </div>
+    </div>
+    <p class="import-hint">Die letzten Kategorie-Zuordnungen, neueste zuerst.</p>
+    <div id="categorizationLogList" class="review-list"></div>
+    <p id="categorizationLogEmptyState" class="empty-state" hidden>Noch keine Zuordnungen protokolliert.</p>
+    <div class="dialog-actions">
+      <button type="button" id="categorizationLogCloseBtn" class="btn-primary">Schliessen</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="addDialog">
+  <form id="addForm">
+    <h2>Neue Ausgabe</h2>
+    <label>Datum
+      <input type="date" id="fDate" required>
+    </label>
+    <label>Beschreibung
+      <input type="text" id="fDesc" placeholder="z.B. Migros" required>
+    </label>
+    <label>Betrag
+      <input type="number" id="fAmount" step="0.05" min="0" required>
+    </label>
+    <label>Kategorie
+      <select id="fCategory"></select>
+    </label>
+    <div class="dialog-actions">
+      <button type="button" id="cancelBtn" class="btn-secondary">Abbrechen</button>
+      <button type="submit" class="btn-primary">Speichern</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="goalsDialog">
+  <form id="goalsForm">
+    <h2>Budget-Ziele</h2>
+    <p class="import-hint">Optionale monatliche Limiten in CHF. Sie gelten jeden Monat gleich, bis du sie hier änderst.</p>
+    <div class="goals-form-content">
+      <label class="goal-field goal-field-overall">
+        Gesamtbudget pro Monat (optional)
+        <input type="number" id="goalOverall" min="0" step="0.05" placeholder="z.B. 2500">
+      </label>
+      <div class="goal-field-divider">Pro Kategorie (optional)</div>
+      <div id="goalCategoryFields" class="goal-category-fields"></div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="goalsCancelBtn" class="btn-secondary">Abbrechen</button>
+      <button type="submit" class="btn-primary">Speichern</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="lib/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
