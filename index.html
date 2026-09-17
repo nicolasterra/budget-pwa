@@ -75,6 +75,10 @@
         <span class="card-value" id="topCategory">–</span>
       </div>
       <div class="card">
+        <span class="card-label">Gutschriften</span>
+        <span class="card-value card-value-income" id="monthIncome">CHF 0.00</span>
+      </div>
+      <div class="card">
         <span class="card-label">Einträge</span>
         <span class="card-value" id="txCount">0</span>
       </div>
@@ -127,7 +131,7 @@
         </button>
       </div>
     </div>
-    <p class="import-hint">Ausgaben aller Monate, die der Assistent nicht sicher zuordnen konnte.</p>
+    <p class="import-hint">Chronologisch, älteste zuerst: alles, was du noch bestätigen musst – unklare Buchungen, blosse Vorschläge und die ersten automatischen Zuordnungen neu erkannter Muster.</p>
     <div id="reviewQueueList" class="review-list"></div>
     <p id="reviewQueueEmptyState" class="empty-state" hidden>Alles zugeordnet — nichts zu prüfen.</p>
   </section>
@@ -140,8 +144,8 @@
           <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3M6 7l4-4 4 4"/><path d="M3.5 13v2.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V13"/></svg>
           Excel
         </button>
-        <button id="addBtn" class="btn-primary">+ Ausgabe</button>
-        <button id="clearMonthBtn" class="btn-secondary" aria-label="Alle Ausgaben dieses Monats löschen">
+        <button id="addBtn" class="btn-primary">+ Eintrag</button>
+        <button id="clearMonthBtn" class="btn-secondary" aria-label="Alle Einträge dieses Monats löschen">
           <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2M6 6l.7 9.2a1.5 1.5 0 0 0 1.5 1.3h3.6a1.5 1.5 0 0 0 1.5-1.3L14 6"/></svg>
         </button>
       </div>
@@ -149,12 +153,12 @@
     <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
     <p id="importSourceInfo" class="import-source-info" hidden></p>
     <div id="transactionList" class="transaction-list"></div>
-    <p id="emptyState" class="empty-state" hidden>Noch keine Ausgaben für diesen Monat. Füge eine Ausgabe hinzu oder importiere dein Excel.</p>
+    <p id="emptyState" class="empty-state" hidden>Noch keine Einträge für diesen Monat. Füge einen Eintrag hinzu oder importiere dein Excel/CSV.</p>
   </section>
 
   <section class="teach-section tab-panel" id="panel-teach" role="tabpanel" aria-labelledby="tab-teach" hidden>
     <div class="section-header"><h2>Lern-Assistent</h2></div>
-    <p class="teach-intro">Kein echter KI-Chat — ein einfacher Assistent, dem du beibringen kannst, welcher Händler zu welcher Kategorie gehört. Sag ihm z. B. „Aldi ist Verpflegung“, „Denner gehört zu Verpflegung“ oder „vergiss Aldi“.</p>
+    <p class="teach-intro">Kein echter KI-Chat — ein einfacher Assistent, dem du feste Regeln beibringen kannst, z. B. „Aldi ist Verpflegung“ oder „vergiss Aldi“. Daneben lernt die App still mit: Ordnest du dieselbe Buchung fünfmal hintereinander gleich zu, übernimmt sie das künftig automatisch – die ersten Male noch mit Rückfrage in den Karten.</p>
 
     <div id="teachChatLog" class="teach-chat-log" aria-live="polite"></div>
 
@@ -164,8 +168,13 @@
     </form>
 
     <div class="teach-rules">
-      <div class="teach-rules-header">Gelernte Regeln (<span id="teachRuleCount">0</span>)</div>
+      <div class="teach-rules-header">Feste Regeln (<span id="teachRuleCount">0</span>)</div>
       <div id="teachRulesList" class="teach-rules-list"></div>
+    </div>
+
+    <div class="teach-rules">
+      <div class="teach-rules-header">Erkannte Muster (<span id="patternCount">0</span>) — ab 5 gleichen Zuordnungen hintereinander automatisch</div>
+      <div id="patternsList" class="teach-rules-list teach-patterns-list"></div>
     </div>
 
     <div class="backup-block">
@@ -208,23 +217,31 @@
 
 <dialog id="importDialog">
   <div class="import-content">
-    <h2>Excel importieren</h2>
-    <p class="import-hint">Spalten prüfen und bei Bedarf anpassen, dann importieren.</p>
-    <div class="import-mapping">
+    <h2>Excel / CSV importieren</h2>
+    <p class="import-hint">Spalten prüfen und bei Bedarf anpassen, dann importieren. Belastung und Gutschrift werden automatisch unterschieden; eine Kategorie-Spalte aus deiner Datei wird unverändert übernommen.</p>
+    <p id="importSheetsInfo" class="import-sheets-info" hidden></p>
+    <div class="import-mapping" id="importMapping">
       <label>Datum-Spalte
         <select id="mapDate"></select>
       </label>
       <label>Beschreibung-Spalte
         <select id="mapDesc"></select>
       </label>
-      <label>Betrag-Spalte
+      <label>Betrag / Belastung
         <select id="mapAmount"></select>
       </label>
-      <label>Vorzeichen-Logik
+      <label>Gutschrift-Spalte
+        <select id="mapCredit"></select>
+      </label>
+      <label>Kategorie-Spalte
+        <select id="mapCategory"></select>
+      </label>
+      <label id="mapSignLabel">Vorzeichen-Logik
         <select id="mapSign">
-          <option value="negative">Negative Werte = Ausgabe (Standard)</option>
-          <option value="positive">Positive Werte = Ausgabe</option>
-          <option value="all">Alle Zeilen sind Ausgaben</option>
+          <option value="negative">Negativ = Ausgabe, positiv = Gutschrift</option>
+          <option value="positive">Positiv = Ausgabe, negativ = Gutschrift</option>
+          <option value="all_expense">Alle Zeilen sind Ausgaben</option>
+          <option value="all_income">Alle Zeilen sind Gutschriften</option>
         </select>
       </label>
     </div>
@@ -232,7 +249,7 @@
       <p id="importSummary" class="import-summary"></p>
       <table class="import-preview">
         <thead>
-          <tr><th>Datum</th><th>Beschreibung</th><th>Betrag</th><th>Kategorie</th></tr>
+          <tr><th>Datum</th><th>Beschreibung</th><th>Typ</th><th>Betrag</th><th>Kategorie</th></tr>
         </thead>
         <tbody id="importPreviewBody"></tbody>
       </table>
@@ -247,7 +264,7 @@
 <dialog id="reviewDialog">
   <div class="import-content">
     <h2>Bitte prüfen</h2>
-    <p class="import-hint"><span id="reviewCount">0</span> Ausgabe(n) konnten nicht sicher zugeordnet werden. Kategorie wählen oder bestätigen — der Rest lässt sich jederzeit direkt in der Liste anpassen.</p>
+    <p class="import-hint"><span id="reviewCount">0</span> Eintrag/Einträge konnten nicht sicher zugeordnet werden. Kategorie wählen oder bestätigen — der Rest lässt sich jederzeit im Reiter „Prüfen“ als Karten durchgehen.</p>
     <div id="reviewList" class="review-list"></div>
     <div class="dialog-actions">
       <button type="button" id="reviewDoneBtn" class="btn-primary">Fertig</button>
@@ -279,6 +296,7 @@
         <div class="review-card-body">
           <p id="reviewCardDesc" class="review-card-desc"></p>
           <p id="reviewCardMeta" class="review-card-meta"></p>
+          <p id="reviewCardReason" class="review-card-reason"></p>
           <span id="reviewCardCategory" class="review-card-category-badge"></span>
         </div>
       </div>
@@ -314,7 +332,13 @@
 
 <dialog id="addDialog">
   <form id="addForm">
-    <h2>Neue Ausgabe</h2>
+    <h2>Neuer Eintrag</h2>
+    <label>Typ
+      <select id="fType">
+        <option value="expense">Ausgabe (Belastung)</option>
+        <option value="income">Gutschrift</option>
+      </select>
+    </label>
     <label>Datum
       <input type="date" id="fDate" required>
     </label>

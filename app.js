@@ -21,6 +21,15 @@ const CATEGORIES = [
 
 const FALLBACK_CATEGORY = 'Noch auszuwählen';
 
+// Gutschriften (Zahlungseingänge) brauchen keine Ausgaben-Kategorie – sie bekommen diese Sonderkategorie.
+const INCOME_CATEGORY = 'Einnahme';
+const INCOME_COLOR = '#3a7d5c';
+const TX_EXPENSE = 'expense';
+const TX_INCOME = 'income';
+
+function isExpense(t) { return t.type !== TX_INCOME; }
+function isIncome(t) { return t.type === TX_INCOME; }
+
 const CATEGORY_KEYWORDS = {
   'Konto Übertragung': ['übertrag', 'uebertrag'],
   'Verpflegung': ['lidl', 'migros', 'aldi', 'coop', 'denner', 'volg', 'spar', 'migrolino', 'mcdonald', 'restaurant', 'kebab', 'markthof', 'pronto'],
@@ -59,23 +68,194 @@ function matchLearnedRule(text) {
   return best ? best.category : null;
 }
 
-function guessCategory(description) {
-  const text = (description || '').toLowerCase();
-  const learned = matchLearnedRule(text);
-  if (learned) return { category: learned, certain: true };
+// Nur diese Kategorien darf die eingebaute Schlüsselwortliste von sich aus sicher zuordnen (z. B. Lidl → Verpflegung).
+// Alle anderen Treffer sind reine Vorschläge und landen zur Bestätigung in den Karten.
+const AUTO_ASSIGN_CATEGORIES = new Set(['Verpflegung']);
 
-  let best = null;
-  const matchedCategories = new Set();
+function matchBuiltinKeywords(text) {
+  const matches = [];
   for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
     for (const kw of keywords) {
-      if (text.includes(kw)) {
-        matchedCategories.add(category);
-        if (!best || kw.length > best.len) best = { category, len: kw.length };
+      let from = 0;
+      while (true) {
+        const idx = text.indexOf(kw, from);
+        if (idx === -1) break;
+        matches.push({ category, kw, idx, end: idx + kw.length });
+        from = idx + 1;
       }
     }
   }
-  if (!best) return { category: FALLBACK_CATEGORY, certain: false };
-  return { category: best.category, certain: matchedCategories.size === 1 };
+  // Ein Treffer, der komplett in einem längeren Treffer liegt („migrol“ in „migrolino“), zählt nicht.
+  const kept = matches.filter(m => !matches.some(n =>
+    n !== m && n.kw.length > m.kw.length && n.idx <= m.idx && n.end >= m.end
+  ));
+  if (!kept.length) return null;
+  kept.sort((a, b) => b.kw.length - a.kw.length);
+  return { category: kept[0].category, categories: new Set(kept.map(m => m.category)) };
+}
+
+// ---- Muster-Gedächtnis -------------------------------------------------------
+// Merkt sich, wie oft hintereinander dieselbe Buchung (Text, bzw. Text + Betrag) derselben
+// Kategorie zugeordnet wurde. Ab PATTERN_AUTO_THRESHOLD darf die App selbst zuordnen; die ersten
+// PATTERN_PROBATION_COUNT automatischen Zuordnungen landen trotzdem noch zur Kontrolle in den Karten.
+const PATTERNS_STORAGE_KEY = 'budget_patterns';
+const PATTERN_AUTO_THRESHOLD = 5;
+const PATTERN_PROBATION_COUNT = 3;
+
+let patterns = loadPatterns();
+
+function loadPatterns() {
+  try { return JSON.parse(localStorage.getItem(PATTERNS_STORAGE_KEY)) || {}; }
+  catch { return {}; }
+}
+
+function savePatterns() {
+  localStorage.setItem(PATTERNS_STORAGE_KEY, JSON.stringify(patterns));
+}
+
+// Bank-Floskeln und Referenznummern, die nichts über den Händler aussagen.
+const DESCRIPTION_BOILERPLATE = [
+  /warenbezug und dienstleistungen/g,
+  /twint-?\s?(zahlung|belastung|gutschrift)/g,
+  /kartenbelastung/g,
+  /(belastung|zahlungsauftrag)\s+e-?banking/g,
+  /zahlungseingang/g,
+  /rückgutschrift|rueckgutschrift/g,
+  /geld (gesendet an|erhalten von)/g,
+  /anzahl buchungen:?\s*\d+/g,
+  /ref\.?\s*-?\s*nr\.?\s*:?\s*\d+/g,
+  /\bfil\.?\s*\d+/g,
+];
+
+function normalizeDescription(description) {
+  let text = (description || '').toLowerCase();
+  DESCRIPTION_BOILERPLATE.forEach(re => { text = text.replace(re, ' '); });
+  text = text.replace(/[^\p{L}\p{N}&\-.\s]/gu, ' ');
+  text = text.split(/\s+/).filter(tok => /[\p{L}\p{N}&]/u.test(tok)).join(' ').trim();
+  return text;
+}
+
+function patternKeysFor(description, amount) {
+  const norm = normalizeDescription(description);
+  const generic = norm.length < 3;
+  const base = generic ? (description || '').toLowerCase().trim() : norm;
+  const amountStr = Number(amount).toFixed(2);
+  const keys = [{ key: `da:${base}|${amountStr}`, label: `${base} · ${formatCurrency(Number(amount))}` }];
+  // Ohne Händlernamen (z. B. „TWINT Geld gesendet an“) zählt nur die Kombination mit dem Betrag.
+  if (!generic) keys.push({ key: `d:${norm}`, label: norm });
+  return keys;
+}
+
+function isTrustedPattern(p) {
+  return !!p && p.streak >= PATTERN_AUTO_THRESHOLD;
+}
+
+// Eine bestätigte Zuordnung merken. Gibt den vorherigen Zustand zurück, damit „Zurück“ ihn wiederherstellen kann.
+function learnPattern(description, amount, category) {
+  const snapshot = [];
+  patternKeysFor(description, amount).forEach(({ key, label }) => {
+    const prev = patterns[key] ? { ...patterns[key] } : null;
+    snapshot.push({ key, prev });
+    if (prev && prev.category === category) {
+      patterns[key] = { ...prev, streak: prev.streak + 1, label, updatedAt: Date.now() };
+    } else {
+      patterns[key] = { category, streak: 1, autoCount: 0, label, updatedAt: Date.now() };
+    }
+  });
+  savePatterns();
+  return snapshot;
+}
+
+function restorePatterns(snapshot) {
+  if (!snapshot) return;
+  snapshot.forEach(({ key, prev }) => {
+    if (prev) patterns[key] = prev;
+    else delete patterns[key];
+  });
+  savePatterns();
+}
+
+function forgetPattern(key) {
+  if (!(key in patterns)) return false;
+  delete patterns[key];
+  savePatterns();
+  return true;
+}
+
+function countPatternAutoAssignment(key) {
+  if (!patterns[key]) return;
+  patterns[key].autoCount = (patterns[key].autoCount || 0) + 1;
+  patterns[key].updatedAt = Date.now();
+}
+
+function lookupPattern(description, amount) {
+  const entries = patternKeysFor(description, amount)
+    .map(k => ({ key: k.key, entry: patterns[k.key] }))
+    .filter(e => e.entry);
+  if (!entries.length) return null;
+  const trusted = entries.find(e => isTrustedPattern(e.entry));
+  return trusted ? { ...trusted, trusted: true } : { ...entries[0], trusted: false };
+}
+
+// Liefert { category, certain, reason, patternKey?, streak? }.
+// certain = darf ohne Rückfrage übernommen werden; sonst landet der Eintrag in den Karten.
+function guessCategory(description, amount, type = TX_EXPENSE) {
+  const text = (description || '').toLowerCase();
+
+  const learned = matchLearnedRule(text);
+  if (learned) return { category: learned, certain: true, reason: 'rule' };
+
+  const pattern = lookupPattern(description, amount);
+  if (pattern && pattern.trusted) {
+    const probation = (pattern.entry.autoCount || 0) < PATTERN_PROBATION_COUNT;
+    return {
+      category: pattern.entry.category,
+      certain: !probation,
+      reason: probation ? 'pattern_probation' : 'pattern',
+      patternKey: pattern.key,
+      streak: pattern.entry.streak,
+    };
+  }
+
+  const builtin = matchBuiltinKeywords(text);
+  const builtinCertain = !!builtin && builtin.categories.size === 1 && AUTO_ASSIGN_CATEGORIES.has(builtin.category);
+
+  if (pattern) {
+    // Noch nicht oft genug bestätigt: die bisherige Wahl vorschlagen, aber prüfen lassen.
+    const agrees = builtinCertain && builtin.category === pattern.entry.category;
+    return {
+      category: pattern.entry.category,
+      certain: agrees,
+      reason: agrees ? 'keyword' : 'pattern_learning',
+      patternKey: pattern.key,
+      streak: pattern.entry.streak,
+    };
+  }
+
+  if (builtin) {
+    if (builtinCertain) return { category: builtin.category, certain: true, reason: 'keyword' };
+    return { category: builtin.category, certain: false, reason: builtin.categories.size > 1 ? 'ambiguous' : 'suggestion' };
+  }
+
+  if (type === TX_INCOME) return { category: INCOME_CATEGORY, certain: true, reason: 'income' };
+  return { category: FALLBACK_CATEGORY, certain: false, reason: 'no_match' };
+}
+
+const REVIEW_REASON_TEXT = {
+  no_match: 'kein Muster erkannt',
+  suggestion: 'Vorschlag, noch nicht bestätigt',
+  ambiguous: 'mehrere Kategorien möglich',
+  pattern_learning: 'Muster wird gelernt',
+  pattern_probation: 'erste automatische Zuordnung, bitte bestätigen',
+  unknown_file_category: 'Kategorie aus Datei unbekannt',
+  file_unassigned: 'in der Datei nicht zugeordnet',
+};
+
+function reviewReasonText(t) {
+  if (t.reason === 'pattern_learning' && t.streak) {
+    return `Muster wird gelernt (${Math.min(t.streak, PATTERN_AUTO_THRESHOLD)}/${PATTERN_AUTO_THRESHOLD})`;
+  }
+  return REVIEW_REASON_TEXT[t.reason] || 'bitte prüfen';
 }
 
 function monthStrOf(date) {
@@ -91,10 +271,32 @@ let currentMonth = monthStrOf(new Date());
 
 function loadTransactions() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+    return migrateTransactions(JSON.parse(localStorage.getItem(STORAGE_KEY)) || []);
   } catch {
     return [];
   }
+}
+
+// Ältere Einträge kennen weder Typ (Ausgabe/Gutschrift) noch Reihenfolge innerhalb eines Tages.
+// Frühere Importe wurden in Datei-Reihenfolge (neueste zuerst) gespeichert → rückwärts nummerieren.
+function migrateTransactions(list) {
+  if (!Array.isArray(list)) return [];
+  list.forEach((t, i) => {
+    if (t.type !== TX_INCOME && t.type !== TX_EXPENSE) t.type = TX_EXPENSE;
+    if (typeof t.seq !== 'number') t.seq = -i;
+    if (typeof t.amount !== 'number') t.amount = Number(t.amount) || 0;
+  });
+  return list;
+}
+
+// Chronologisch: nach Datum, innerhalb eines Tages nach Buchungsreihenfolge.
+function compareChronological(a, b) {
+  return a.date.localeCompare(b.date) || ((a.seq || 0) - (b.seq || 0)) || String(a.id).localeCompare(String(b.id));
+}
+
+function formatDate(isoDate) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate || '');
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : (isoDate || '');
 }
 
 function saveTransactions() {
@@ -122,10 +324,21 @@ function formatCurrencyParts(amount) {
   return { currency: formatted.slice(0, idx).trim(), number: formatted.slice(idx).trim() };
 }
 
+function monthTransactionsOf(monthStr) {
+  return transactions.filter(t => t.date.slice(0, 7) === monthStr);
+}
+
+function sumAmounts(list) {
+  return list.reduce((sum, t) => sum + t.amount, 0);
+}
+
+// Ausgaben-Total des Monats (Gutschriften zählen nicht dazu).
 function getMonthTotal(monthStr) {
-  return transactions
-    .filter(t => t.date.slice(0, 7) === monthStr)
-    .reduce((sum, t) => sum + t.amount, 0);
+  return sumAmounts(monthTransactionsOf(monthStr).filter(isExpense));
+}
+
+function getMonthIncome(monthStr) {
+  return sumAmounts(monthTransactionsOf(monthStr).filter(isIncome));
 }
 
 function getMonthDelta(monthStr) {
@@ -146,14 +359,20 @@ function formatMonthShortLabel(monthStr, referenceMonthStr) {
 }
 
 function getMonthTransactions() {
-  return transactions
-    .filter(t => t.date.slice(0, 7) === currentMonth)
-    .sort((a, b) => b.date.localeCompare(a.date));
+  return monthTransactionsOf(currentMonth).sort(compareChronological);
 }
 
 function categoryColor(name) {
+  if (name === INCOME_CATEGORY) return INCOME_COLOR;
   const found = CATEGORIES.find(c => c.name === name);
   return found ? found.color : '#64748b';
+}
+
+// Auswählbare Kategorien: Gutschriften bekommen zusätzlich „Einnahme“ angeboten.
+function selectableCategories(type) {
+  const list = CATEGORIES.map(c => ({ name: c.name, color: c.color }));
+  if (type === TX_INCOME) list.unshift({ name: INCOME_CATEGORY, color: INCOME_COLOR });
+  return list;
 }
 
 function escapeHtml(str) {
@@ -162,8 +381,10 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-function buildCategoryOptions(selected) {
-  return CATEGORIES.map(c => `<option value="${c.name}" ${c.name === selected ? 'selected' : ''}>${c.name}</option>`).join('');
+function buildCategoryOptions(selected, type) {
+  const list = selectableCategories(type);
+  if (selected && !list.some(c => c.name === selected)) list.push({ name: selected, color: categoryColor(selected) });
+  return list.map(c => `<option value="${escapeHtml(c.name)}" ${c.name === selected ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
 }
 
 const CATEGORIZATION_LOG_KEY = 'budget_categorization_log';
@@ -195,16 +416,21 @@ function logCategorization(t, fromCategory, toCategory) {
   saveCategorizationLog();
 }
 
-function updateTransactionCategory(id, newCategory) {
+// Vom Benutzer bestätigte/gewählte Kategorie übernehmen. Jede Bestätigung trainiert das Muster-Gedächtnis;
+// der zurückgegebene Schnappschuss erlaubt es, das Gelernte bei „Zurück“ wieder rückgängig zu machen.
+function updateTransactionCategory(id, newCategory, options = {}) {
   const t = transactions.find(x => x.id === id);
-  if (!t) return;
+  if (!t) return null;
   const fromCategory = t.category;
   const changed = fromCategory !== newCategory || t.uncertain !== false;
   t.category = newCategory;
   t.uncertain = false;
+  const snapshot = options.learn === false ? null : learnPattern(t.description, t.amount, newCategory);
   if (changed) logCategorization(t, fromCategory, newCategory);
   saveTransactions();
   render();
+  renderPatternsList();
+  return snapshot;
 }
 
 const GOALS_STORAGE_KEY = 'budget_goals';
@@ -258,15 +484,17 @@ function render() {
   document.getElementById('currentMonthLabel').textContent = formatMonthLabel(currentMonth);
 
   const monthTx = getMonthTransactions();
-  const total = monthTx.reduce((sum, t) => sum + t.amount, 0);
+  const expenses = monthTx.filter(isExpense);
+  const total = sumAmounts(expenses);
   const { currency, number } = formatCurrencyParts(total);
   document.getElementById('heroCurrency').textContent = currency;
   document.getElementById('heroValue').textContent = number;
   document.getElementById('txCount').textContent = monthTx.length;
+  document.getElementById('monthIncome').textContent = formatCurrency(sumAmounts(monthTx.filter(isIncome)));
   renderHeroDelta(currentMonth);
 
   const byCategory = {};
-  monthTx.forEach(t => {
+  expenses.forEach(t => {
     byCategory[t.category] = (byCategory[t.category] || 0) + t.amount;
   });
   const sortedCategories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
@@ -305,16 +533,20 @@ function render() {
   txListEl.innerHTML = '';
   emptyState.hidden = monthTx.length > 0;
   monthTx.forEach(t => {
+    const income = isIncome(t);
     const item = document.createElement('div');
-    item.className = 'transaction-item' + (t.uncertain ? ' needs-category' : '');
+    item.className = 'transaction-item' + (t.uncertain ? ' needs-category' : '') + (income ? ' is-income' : '');
+    const metaParts = [formatDate(t.date)];
+    if (income) metaParts.push('Gutschrift');
+    if (t.uncertain) metaParts.push(reviewReasonText(t));
     item.innerHTML = `
       <span class="tx-dot" style="background:${categoryColor(t.category)}"></span>
       <div class="tx-info">
         <span class="tx-desc">${escapeHtml(t.description)}</span>
-        <span class="tx-meta">${t.date}${t.uncertain ? ' · bitte prüfen' : ''}</span>
+        <span class="tx-meta">${escapeHtml(metaParts.join(' · '))}</span>
       </div>
-      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category)}</select>
-      <span class="tx-amount">${formatCurrency(t.amount)}</span>
+      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category, t.type)}</select>
+      <span class="tx-amount${income ? ' is-income' : ''}">${income ? '+ ' : ''}${formatCurrency(t.amount)}</span>
       <button class="tx-delete" data-id="${t.id}" aria-label="Löschen">✕</button>
     `;
     txListEl.appendChild(item);
@@ -400,7 +632,7 @@ function renderHistoryList() {
   const listEl = document.getElementById('historyList');
   const emptyEl = document.getElementById('historyEmptyState');
 
-  const totals = months.map(m => ({ month: m, total: getMonthTotal(m) }));
+  const totals = months.map(m => ({ month: m, total: getMonthTotal(m), income: getMonthIncome(m) }));
   const maxTotal = Math.max(...totals.map(t => t.total), 0);
 
   if (!totals.length) {
@@ -409,7 +641,7 @@ function renderHistoryList() {
     return;
   }
   emptyEl.hidden = true;
-  listEl.innerHTML = totals.map(({ month, total }) => {
+  listEl.innerHTML = totals.map(({ month, total, income }) => {
     const pct = maxTotal ? (total / maxTotal) * 100 : 0;
     const isCurrent = month === currentMonth;
     return `
@@ -421,15 +653,15 @@ function renderHistoryList() {
         <div class="history-bar-track">
           <div class="history-bar-fill" style="width:${pct}%"></div>
         </div>
+        ${income > 0 ? `<div class="history-income">Gutschriften: + ${formatCurrency(income)}</div>` : ''}
       </button>
     `;
   }).join('');
 }
 
+// Alle noch zu bestätigenden Einträge, chronologisch (älteste zuerst).
 function getReviewQueue() {
-  return transactions
-    .filter(t => t.uncertain)
-    .sort((a, b) => b.date.localeCompare(a.date));
+  return transactions.filter(t => t.uncertain).sort(compareChronological);
 }
 
 function renderReviewQueue() {
@@ -452,9 +684,9 @@ function renderReviewQueue() {
     <div class="review-row">
       <div class="tx-info">
         <span class="tx-desc">${escapeHtml(t.description)}</span>
-        <span class="tx-meta">${t.date} · ${formatCurrency(t.amount)}</span>
+        <span class="tx-meta">${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)}${isIncome(t) ? ' (Gutschrift)' : ''} · ${escapeHtml(reviewReasonText(t))}</span>
       </div>
-      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category)}</select>
+      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category, t.type)}</select>
       <button class="tx-delete" data-id="${t.id}" aria-label="Löschen">✕</button>
     </div>
   `).join('');
@@ -504,12 +736,14 @@ function renderReviewCard() {
   document.getElementById('reviewSessionProgress').textContent =
     `${reviewSession.index + 1} / ${reviewSession.ids.length}`;
   document.getElementById('reviewCardDesc').textContent = t.description;
-  document.getElementById('reviewCardMeta').textContent = `${t.date} · ${formatCurrency(t.amount)}`;
+  document.getElementById('reviewCardMeta').textContent =
+    `${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)} · ${isIncome(t) ? 'Gutschrift' : 'Ausgabe'}`;
+  document.getElementById('reviewCardReason').textContent = reviewReasonText(t);
   const badge = document.getElementById('reviewCardCategory');
   badge.textContent = t.category;
   badge.style.background = categoryColor(t.category);
 
-  document.getElementById('reviewChipGrid').innerHTML = CATEGORIES.map(c => `
+  document.getElementById('reviewChipGrid').innerHTML = selectableCategories(t.type).map(c => `
     <button type="button" class="review-chip" data-category="${escapeHtml(c.name)}">
       <span class="review-chip-dot" style="background:${c.color}"></span>${escapeHtml(c.name)}
     </button>
@@ -575,8 +809,8 @@ function assignReviewCategory(category) {
   const fromUncertain = t.uncertain;
   setReviewInputsEnabled(false);
   flyOutCard(1, () => {
-    updateTransactionCategory(t.id, category);
-    reviewSession.history.push({ id: t.id, type: 'assign', fromCategory, fromUncertain, toCategory: category });
+    const patternSnapshot = updateTransactionCategory(t.id, category);
+    reviewSession.history.push({ id: t.id, type: 'assign', fromCategory, fromUncertain, toCategory: category, patternSnapshot });
     reviewSession.redoStack = [];
     advanceReviewSession();
   });
@@ -604,8 +838,11 @@ function undoReviewAction() {
       t.category = entry.fromCategory;
       t.uncertain = entry.fromUncertain;
       saveTransactions();
-      render();
     }
+    // Auch das dabei Gelernte zurücknehmen, sonst zählt die zurückgenommene Zuordnung weiter als Bestätigung.
+    restorePatterns(entry.patternSnapshot);
+    render();
+    renderPatternsList();
   }
   reviewSession.redoStack.push(entry);
   reviewSession.index = Math.max(0, reviewSession.index - 1);
@@ -623,8 +860,10 @@ function redoReviewAction() {
     if (t) {
       t.category = entry.toCategory;
       t.uncertain = false;
+      entry.patternSnapshot = learnPattern(t.description, t.amount, entry.toCategory);
       saveTransactions();
       render();
+      renderPatternsList();
     }
   }
   reviewSession.history.push(entry);
@@ -762,24 +1001,38 @@ function setComputedCell(ws, r, c, formula, value, fmt) {
   ws[ref] = cell;
 }
 
+// Rohdaten-Spalten: A DATUM · B MONAT · C TYP · D BESCHREIBUNG · E KATEGORIE · F BETRAG
+const EXPORT_TYPE_LABEL = { [TX_EXPENSE]: 'Ausgabe', [TX_INCOME]: 'Gutschrift' };
+
+function expenseSumFormula(monthStr, categoryName) {
+  return `SUMIFS(Rohdaten!$F:$F,Rohdaten!$B:$B,"${monthStr}",Rohdaten!$C:$C,"Ausgabe",Rohdaten!$E:$E,"${categoryName}")`;
+}
+
+function incomeSumFormula(monthStr) {
+  return `SUMIFS(Rohdaten!$F:$F,Rohdaten!$B:$B,"${monthStr}",Rohdaten!$C:$C,"Gutschrift")`;
+}
+
 function buildRawDataSheet() {
-  const sorted = transactions.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = transactions.slice().sort(compareChronological);
   const aoa = [
-    ['DATUM', 'MONAT', 'BESCHREIBUNG', 'KATEGORIE', 'BETRAG (CHF)'],
-    ...sorted.map(t => [t.date, t.date.slice(0, 7), t.description, t.category, t.amount]),
+    ['DATUM', 'MONAT', 'TYP', 'BESCHREIBUNG', 'KATEGORIE', 'BETRAG (CHF)'],
+    ...sorted.map(t => [t.date, t.date.slice(0, 7), EXPORT_TYPE_LABEL[t.type] || 'Ausgabe', t.description, t.category, t.amount]),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 40 }, { wch: 18 }, { wch: 14 }];
-  stampFormat(ws, sorted.map((_, i) => ({ r: i + 1, c: 4 })), CHF_FMT);
+  ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 11 }, { wch: 40 }, { wch: 18 }, { wch: 14 }];
+  stampFormat(ws, sorted.map((_, i) => ({ r: i + 1, c: 5 })), CHF_FMT);
   return ws;
 }
 
 function buildMonthSheet(monthStr) {
-  const monthTx = transactions.filter(t => t.date.slice(0, 7) === monthStr);
+  const monthTx = monthTransactionsOf(monthStr);
+  const expenses = monthTx.filter(isExpense);
 
   const byCategory = {};
-  monthTx.forEach(t => { byCategory[t.category] = (byCategory[t.category] || 0) + t.amount; });
+  expenses.forEach(t => { byCategory[t.category] = (byCategory[t.category] || 0) + t.amount; });
   const categoryRows = CATEGORIES.filter(c => byCategory[c.name]);
+  const expenseTotal = sumAmounts(expenses);
+  const incomeTotal = sumAmounts(monthTx.filter(isIncome));
 
   const aoa = [];
   const merges = [];
@@ -796,29 +1049,30 @@ function buildMonthSheet(monthStr) {
   });
 
   aoa.push([]);
-  const gesamtRow = aoa.length;
-  const gesamtValue = monthTx.reduce((s, t) => s + t.amount, 0);
-  aoa.push(['GESAMT', gesamtValue]);
+  const ausgabenRow = aoa.length;
+  aoa.push(['AUSGABEN TOTAL', expenseTotal]);
+  const einnahmenRow = aoa.length;
+  aoa.push(['EINNAHMEN', incomeTotal]);
+  const differenzRow = aoa.length;
+  aoa.push(['DIFFERENZ', incomeTotal - expenseTotal]);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 22 }, { wch: 15 }];
   ws['!merges'] = merges;
 
   catRowEntries.forEach(entry => {
-    setComputedCell(
-      ws, entry.r, 1,
-      `SUMIFS(Rohdaten!$E:$E,Rohdaten!$B:$B,"${monthStr}",Rohdaten!$D:$D,"${entry.name}")`,
-      entry.value, CHF_FMT
-    );
+    setComputedCell(ws, entry.r, 1, expenseSumFormula(monthStr, entry.name), entry.value, CHF_FMT);
   });
 
   if (catRowEntries.length) {
     const firstCatExcelRow = catRowEntries[0].r + 1;
     const lastCatExcelRow = catRowEntries[catRowEntries.length - 1].r + 1;
-    setComputedCell(ws, gesamtRow, 1, `SUM(B${firstCatExcelRow}:B${lastCatExcelRow})`, gesamtValue, CHF_FMT);
+    setComputedCell(ws, ausgabenRow, 1, `SUM(B${firstCatExcelRow}:B${lastCatExcelRow})`, expenseTotal, CHF_FMT);
   } else {
-    setComputedCell(ws, gesamtRow, 1, null, 0, CHF_FMT);
+    setComputedCell(ws, ausgabenRow, 1, null, 0, CHF_FMT);
   }
+  setComputedCell(ws, einnahmenRow, 1, incomeSumFormula(monthStr), incomeTotal, CHF_FMT);
+  setComputedCell(ws, differenzRow, 1, `B${einnahmenRow + 1}-B${ausgabenRow + 1}`, incomeTotal - expenseTotal, CHF_FMT);
 
   return ws;
 }
@@ -830,12 +1084,15 @@ function buildOverviewSheet(orderedMonths) {
 
   const categoryData = CATEGORIES.map(cat => {
     const monthValues = orderedMonths.map(m =>
-      transactions.filter(t => t.category === cat.name && t.date.slice(0, 7) === m).reduce((s, t) => s + t.amount, 0)
+      sumAmounts(monthTransactionsOf(m).filter(t => isExpense(t) && t.category === cat.name))
     );
     const rowTotal = monthValues.reduce((s, v) => s + v, 0);
     return { name: cat.name, monthValues, rowTotal };
   });
   const grandTotal = categoryData.reduce((s, c) => s + c.rowTotal, 0);
+  const monthTotals = orderedMonths.map(m => getMonthTotal(m));
+  const monthIncomes = orderedMonths.map(m => getMonthIncome(m));
+  const incomeTotal = monthIncomes.reduce((s, v) => s + v, 0);
 
   const aoa = [];
   const merges = [];
@@ -854,17 +1111,21 @@ function buildOverviewSheet(orderedMonths) {
 
   aoa.push([]);
   const totalRowIdx = aoa.length;
-  const monthTotals = orderedMonths.map(m => getMonthTotal(m));
-  aoa.push(['TOTAL', ...monthTotals, grandTotal, grandTotal > 0 ? 1 : 0]);
+  aoa.push(['AUSGABEN TOTAL', ...monthTotals, grandTotal, grandTotal > 0 ? 1 : 0]);
+  const incomeRowIdx = aoa.length;
+  aoa.push(['EINNAHMEN', ...monthIncomes, incomeTotal, '']);
+  const diffRowIdx = aoa.length;
+  aoa.push(['DIFFERENZ (EINNAHMEN − AUSGABEN)', ...monthIncomes.map((v, i) => v - monthTotals[i]), incomeTotal - grandTotal, '']);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 20 }, ...orderedMonths.map(() => ({ wch: 13 })), { wch: 16 }, { wch: 8 }];
+  ws['!cols'] = [{ wch: 30 }, ...orderedMonths.map(() => ({ wch: 13 })), { wch: 16 }, { wch: 8 }];
   ws['!merges'] = merges;
 
   const firstMonthColLetter = XLSX.utils.encode_col(1);
   const lastMonthColLetter = XLSX.utils.encode_col(orderedMonths.length);
   const totalColLetter = XLSX.utils.encode_col(totalColIdx);
   const totalRowExcel = totalRowIdx + 1;
+  const incomeRowExcel = incomeRowIdx + 1;
   const firstCatRowExcel = catRows[0] + 1;
   const lastCatRowExcel = catRows[catRows.length - 1] + 1;
 
@@ -872,12 +1133,7 @@ function buildOverviewSheet(orderedMonths) {
     const r = catRows[i];
     const excelRow = r + 1;
     cat.monthValues.forEach((value, ci) => {
-      const m = orderedMonths[ci];
-      setComputedCell(
-        ws, r, 1 + ci,
-        `SUMIFS(Rohdaten!$E:$E,Rohdaten!$B:$B,"${m}",Rohdaten!$D:$D,"${cat.name}")`,
-        value, CHF_FMT
-      );
+      setComputedCell(ws, r, 1 + ci, expenseSumFormula(orderedMonths[ci], cat.name), value, CHF_FMT);
     });
     setComputedCell(
       ws, r, totalColIdx,
@@ -899,6 +1155,12 @@ function buildOverviewSheet(orderedMonths) {
       `SUM(${colLetter}${firstCatRowExcel}:${colLetter}${lastCatRowExcel})`,
       monthTotals[ci], CHF_FMT
     );
+    setComputedCell(ws, incomeRowIdx, 1 + ci, incomeSumFormula(m), monthIncomes[ci], CHF_FMT);
+    setComputedCell(
+      ws, diffRowIdx, 1 + ci,
+      `${colLetter}${incomeRowExcel}-${colLetter}${totalRowExcel}`,
+      monthIncomes[ci] - monthTotals[ci], CHF_FMT
+    );
   });
   setComputedCell(
     ws, totalRowIdx, totalColIdx,
@@ -906,6 +1168,16 @@ function buildOverviewSheet(orderedMonths) {
     grandTotal, CHF_FMT
   );
   setComputedCell(ws, totalRowIdx, pctColIdx, null, grandTotal > 0 ? 1 : 0, PCT_FMT);
+  setComputedCell(
+    ws, incomeRowIdx, totalColIdx,
+    `SUM(${firstMonthColLetter}${incomeRowExcel}:${lastMonthColLetter}${incomeRowExcel})`,
+    incomeTotal, CHF_FMT
+  );
+  setComputedCell(
+    ws, diffRowIdx, totalColIdx,
+    `${totalColLetter}${incomeRowExcel}-${totalColLetter}${totalRowExcel}`,
+    incomeTotal - grandTotal, CHF_FMT
+  );
 
   return ws;
 }
@@ -966,15 +1238,18 @@ document.getElementById('nextMonth').addEventListener('click', () => {
 });
 
 const categorySelect = document.getElementById('fCategory');
-CATEGORIES.forEach(c => {
-  const opt = document.createElement('option');
-  opt.value = c.name;
-  opt.textContent = c.name;
-  categorySelect.appendChild(opt);
-});
+const typeSelect = document.getElementById('fType');
+
+function fillAddCategorySelect() {
+  const previous = categorySelect.value;
+  categorySelect.innerHTML = buildCategoryOptions(previous, typeSelect.value);
+}
+typeSelect.addEventListener('change', fillAddCategorySelect);
 
 const dialog = document.getElementById('addDialog');
 document.getElementById('addBtn').addEventListener('click', () => {
+  typeSelect.value = TX_EXPENSE;
+  fillAddCategorySelect();
   document.getElementById('fDate').value = localIsoDate(new Date());
   document.getElementById('fDesc').value = '';
   document.getElementById('fAmount').value = '';
@@ -986,15 +1261,19 @@ document.getElementById('addForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const date = document.getElementById('fDate').value;
   const description = document.getElementById('fDesc').value.trim();
-  const amount = parseFloat(document.getElementById('fAmount').value);
+  const amount = Math.abs(parseFloat(document.getElementById('fAmount').value));
   const category = categorySelect.value;
+  const type = typeSelect.value === TX_INCOME ? TX_INCOME : TX_EXPENSE;
   if (!date || !description || isNaN(amount)) return;
 
-  transactions.push({ id: Date.now().toString(), date, description, amount, category });
+  // Manuelle Einträge kommen ans Ende des Tages; die Kategorie gilt als vom Benutzer bestätigt.
+  transactions.push({ id: Date.now().toString(), date, description, amount, type, category, uncertain: false, seq: 1e9 });
+  learnPattern(description, amount, category);
   saveTransactions();
   currentMonth = date.slice(0, 7);
   dialog.close();
   render();
+  renderPatternsList();
 });
 
 const goalsDialog = document.getElementById('goalsDialog');
@@ -1042,17 +1321,17 @@ document.getElementById('transactionList').addEventListener('click', (e) => {
 document.getElementById('clearMonthBtn').addEventListener('click', () => {
   const monthTx = getMonthTransactions();
   if (!monthTx.length) {
-    showToast('Keine Ausgaben in diesem Monat.');
+    showToast('Keine Einträge in diesem Monat.');
     return;
   }
   const label = formatMonthLabel(currentMonth);
-  if (!confirm(`${monthTx.length} Ausgabe(n) aus ${label} wirklich löschen? Das kann nicht rückgängig gemacht werden.`)) return;
+  if (!confirm(`${monthTx.length} Eintrag/Einträge aus ${label} wirklich löschen? Das kann nicht rückgängig gemacht werden.`)) return;
 
   const idsToRemove = new Set(monthTx.map(t => t.id));
   transactions = transactions.filter(t => !idsToRemove.has(t.id));
   saveTransactions();
   render();
-  showToast(`${monthTx.length} Ausgabe(n) aus ${label} gelöscht.`);
+  showToast(`${monthTx.length} Eintrag/Einträge aus ${label} gelöscht.`);
 });
 
 document.getElementById('transactionList').addEventListener('change', (e) => {
@@ -1110,17 +1389,157 @@ function parseAmount(value) {
   return null;
 }
 
-const DATE_KEYWORDS = ['datum', 'buchungsdatum', 'valuta', 'date'];
-const DESC_KEYWORDS = ['text', 'buchungstext', 'beschreibung', 'avisierungstext', 'zahlungszweck', 'description', 'details'];
-const AMOUNT_KEYWORDS = ['betrag', 'amount', 'belastung'];
+const DATE_KEYWORDS = ['datum', 'buchungsdatum', 'valuta', 'date', 'buchung'];
+const DESC_KEYWORDS = ['buchungstext', 'text', 'beschreibung', 'avisierungstext', 'zahlungszweck', 'description', 'details', 'bezeichnung', 'händler', 'haendler', 'name'];
+const AMOUNT_KEYWORDS = ['betrag', 'amount', 'belastung', 'debit', 'ausgabe', 'soll'];
+const CREDIT_KEYWORDS = ['gutschrift', 'credit', 'eingang', 'einnahme', 'haben'];
+const CATEGORY_HEADER_KEYWORDS = ['kategorie', 'category', 'rubrik', 'zuordnung'];
+const TYPE_HEADER_NAMES = ['typ', 'type', 'art', 'buchungsart'];
 
-function findColumn(headers, keywords) {
+function findColumn(headers, keywords, exclude = []) {
   const lower = headers.map(h => String(h || '').toLowerCase());
   for (const kw of keywords) {
-    const idx = lower.findIndex(h => h.includes(kw));
+    const idx = lower.findIndex((h, i) => !exclude.includes(i) && h.includes(kw));
     if (idx !== -1) return idx;
   }
   return -1;
+}
+
+function findExactColumn(headers, names, exclude = []) {
+  return headers.findIndex((h, i) => !exclude.includes(i) && names.includes(String(h || '').trim().toLowerCase()));
+}
+
+function analyzeHeaderRow(headers) {
+  const dateIdx = findColumn(headers, DATE_KEYWORDS);
+  const amountIdx = findColumn(headers, AMOUNT_KEYWORDS, [dateIdx]);
+  const creditIdx = findColumn(headers, CREDIT_KEYWORDS, [dateIdx, amountIdx]);
+  const descIdx = findColumn(headers, DESC_KEYWORDS, [dateIdx, amountIdx, creditIdx]);
+  const categoryIdx = findColumn(headers, CATEGORY_HEADER_KEYWORDS, [dateIdx, amountIdx, creditIdx, descIdx]);
+  const typeIdx = findExactColumn(headers, TYPE_HEADER_NAMES, [dateIdx, amountIdx, creditIdx, descIdx, categoryIdx]);
+  return { dateIdx, amountIdx, creditIdx, descIdx, categoryIdx, typeIdx };
+}
+
+// Sucht in den ersten Zeilen eines Blatts die Titelzeile und erkennt zwei Tabellenarten:
+//  - detail:  Einzelbuchungen (Datum, Beschreibung, Betrag – optional Gutschrift, Kategorie, Typ)
+//  - summary: Monatssummen pro Kategorie ohne Datum (z. B. die Monatsblätter des eigenen Exports)
+function detectTable(rows, sheetName) {
+  const limit = Math.min(rows.length, 20);
+  for (let i = 0; i < limit; i++) {
+    const headers = (rows[i] || []).map(c => String(c ?? '').trim());
+    if (headers.filter(Boolean).length < 2) continue;
+    const cols = analyzeHeaderRow(headers);
+    const hasAmount = cols.amountIdx !== -1 || cols.creditIdx !== -1;
+    if (cols.dateIdx !== -1 && cols.descIdx !== -1 && hasAmount) {
+      return { kind: 'detail', sheetName, rows, headerRowIndex: i, headers, ...cols };
+    }
+    if (cols.dateIdx === -1 && cols.descIdx === -1 && cols.categoryIdx !== -1 && hasAmount) {
+      return { kind: 'summary', sheetName, rows, headerRowIndex: i, headers, ...cols };
+    }
+  }
+  return null;
+}
+
+// Notlösung, wenn keine Tabelle erkannt wurde: erste Zeile mit bekannten Stichworten (sonst Zeile 1),
+// die Spalten ordnet der Benutzer dann von Hand zu.
+function findHeaderRow(rows) {
+  const allKeywords = [...DATE_KEYWORDS, ...DESC_KEYWORDS, ...AMOUNT_KEYWORDS];
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const rowText = (rows[i] || []).map(c => String(c || '').toLowerCase());
+    if (rowText.some(cell => allKeywords.some(kw => cell.includes(kw)))) return i;
+  }
+  return 0;
+}
+
+function fallbackTable(rows, sheetName) {
+  const headerRowIndex = findHeaderRow(rows);
+  const headers = (rows[headerRowIndex] || []).map(c => String(c ?? '').trim());
+  return { kind: 'detail', sheetName, rows, headerRowIndex, headers, ...analyzeHeaderRow(headers) };
+}
+
+const MONTH_NAME_NUMBERS = {
+  januar: 1, jan: 1, februar: 2, feb: 2, märz: 3, maerz: 3, mär: 3, mar: 3, april: 4, apr: 4, mai: 5,
+  juni: 6, jun: 6, juli: 7, jul: 7, august: 8, aug: 8, september: 9, sept: 9, sep: 9,
+  oktober: 10, okt: 10, november: 11, nov: 11, dezember: 12, dez: 12,
+};
+
+// Erkennt „2026-08“, „08.2026“, „August 2026“, „08-Aug“ … in Blatt- oder Dateinamen.
+function parseMonthHint(text) {
+  const s = String(text || '').toLowerCase();
+  let m = s.match(/(20\d{2})[-_. /]?(0[1-9]|1[0-2])(?!\d)/);
+  if (m) return { year: Number(m[1]), month: Number(m[2]) };
+  m = s.match(/(^|\D)(0?[1-9]|1[0-2])[-_. /](20\d{2})(?!\d)/);
+  if (m) return { year: Number(m[3]), month: Number(m[2]) };
+  const yearMatch = s.match(/(^|\D)(20\d{2})(?!\d)/);
+  const year = yearMatch ? Number(yearMatch[2]) : null;
+  const names = Object.keys(MONTH_NAME_NUMBERS).sort((a, b) => b.length - a.length);
+  for (const name of names) {
+    if (new RegExp(`(^|[^a-zäöü])${name}(?![a-zäöü])`).test(s)) return { year, month: MONTH_NAME_NUMBERS[name] };
+  }
+  return null;
+}
+
+function resolveSummaryMonth(sheetName, fileName) {
+  const fromSheet = parseMonthHint(sheetName);
+  const fromFile = parseMonthHint(fileName);
+  const month = fromSheet ? fromSheet.month : (fromFile ? fromFile.month : null);
+  if (!month) return null;
+  const year = (fromSheet && fromSheet.year) || (fromFile && fromFile.year) || new Date().getFullYear();
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+// ---- Kategorien aus der Datei den App-Kategorien zuordnen ----------------------------------
+function normalizeCategoryName(s) {
+  return asciiUmlauts(String(s || '').toLowerCase()).replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+const CATEGORY_ALIASES = {
+  'Verpflegung': ['lebensmittel', 'essen', 'nahrung', 'food', 'einkauf', 'einkaufen', 'essen auswaerts', 'lebensmittel einkauf'],
+  'Ausgang': ['ausgang freizeit', 'freizeit', 'ausgehen', 'party', 'bar'],
+  'Kleidung': ['kleider', 'clothes', 'mode'],
+  'Hobbies': ['hobby', 'hobbys', 'sport'],
+  'Friseur': ['coiffeur', 'haare', 'barber'],
+  'Geschenke': ['geschenk', 'gifts'],
+  'Mobile Daten': ['mobile', 'handy', 'telefon', 'natel', 'telefon post', 'abo'],
+  'El. Geräte': ['el geraet', 'elektronik', 'elektro', 'geraete', 'electronics'],
+  'Ferien': ['urlaub', 'reisen', 'reise', 'holiday'],
+  'Auto': ['car', 'benzin', 'tanken', 'bz parking priv', 'parking'],
+  'SBB': ['oev', 'ov', 'zug', 'bahn', 'zvv', 'gav'],
+  'Cevi': ['cevi kosten'],
+  'Konto Übertragung': ['uebertrag', 'uebertragung', 'transfer', 'umbuchung', 'konto'],
+  'Noch auszuwählen': ['offen', 'unklar', 'unbekannt', 'rest', 'noch offen'],
+  [INCOME_CATEGORY]: ['einnahmen', 'gutschrift', 'lohn', 'salaer', 'income', 'einkommen'],
+};
+
+function mapFileCategory(raw) {
+  const norm = normalizeCategoryName(raw);
+  if (!norm) return null;
+  const all = [...CATEGORIES.map(c => c.name), INCOME_CATEGORY];
+  const exact = all.find(name => normalizeCategoryName(name) === norm);
+  if (exact) return exact;
+  for (const [name, aliases] of Object.entries(CATEGORY_ALIASES)) {
+    if (aliases.includes(norm)) return name;
+  }
+  // Teilübereinstimmung, z. B. „Geräte“ ↔ „El. Geräte“
+  const partial = all.find(name => {
+    const n = normalizeCategoryName(name);
+    return n.length >= 4 && norm.length >= 4 && (norm.includes(n) || n.includes(norm));
+  });
+  return partial || null;
+}
+
+// Kategorie einer importierten Zeile bestimmen. Eine Kategorie aus der Datei gilt als bestätigt;
+// nur leere/unbekannte Zuordnungen werden von der App vorgeschlagen und landen in den Karten.
+function resolveRowCategory(row) {
+  const raw = row.fileCategoryRaw;
+  if (raw) {
+    const mapped = mapFileCategory(raw);
+    if (mapped && mapped !== FALLBACK_CATEGORY) return { category: mapped, certain: true, reason: 'file', fromFile: true };
+    const guess = guessCategory(row.description, row.amount, row.type);
+    if (!mapped) return { ...guess, certain: false, reason: 'unknown_file_category', unknownName: raw };
+    if (guess.certain) return guess;
+    return { ...guess, reason: guess.reason === 'no_match' ? 'file_unassigned' : guess.reason };
+  }
+  return guessCategory(row.description, row.amount, row.type);
 }
 
 const IMPORT_LOG_STORAGE_KEY = 'budget_import_log';
@@ -1144,117 +1563,247 @@ function renderImportSourceInfo() {
   el.textContent = `Importiert aus: ${entry.filename}`;
 }
 
-let importSheetRows = [];
-let importHeaderRowIndex = 0;
-
-function findHeaderRow(rows) {
-  const allKeywords = [...DATE_KEYWORDS, ...DESC_KEYWORDS, ...AMOUNT_KEYWORDS];
-  for (let i = 0; i < Math.min(rows.length, 15); i++) {
-    const rowText = rows[i].map(c => String(c || '').toLowerCase());
-    if (rowText.some(cell => allKeywords.some(kw => cell.includes(kw)))) return i;
-  }
-  return 0;
-}
-
+let importTables = [];
+let importSkippedSheets = [];
 let currentImportHeaders = [];
+
+const mapDate = document.getElementById('mapDate');
+const mapDesc = document.getElementById('mapDesc');
+const mapAmount = document.getElementById('mapAmount');
+const mapCredit = document.getElementById('mapCredit');
+const mapCategory = document.getElementById('mapCategory');
+const mapSign = document.getElementById('mapSign');
+const mapSignLabel = document.getElementById('mapSignLabel');
 
 function suggestSignForHeader(headerName) {
   const h = (headerName || '').toLowerCase();
-  if (h.includes('belastung') || h.includes('debit')) return 'all';
+  if (h.includes('belastung') || h.includes('debit') || h.includes('ausgabe') || h.includes('soll')) return 'all_expense';
   return 'negative';
 }
 
 function updateSignSuggestion() {
-  const amountIdx = Number(document.getElementById('mapAmount').value);
-  document.getElementById('mapSign').value = suggestSignForHeader(currentImportHeaders[amountIdx]);
+  mapSign.value = suggestSignForHeader(currentImportHeaders[Number(mapAmount.value)]);
+  // Mit eigener Gutschrift-Spalte ist das Vorzeichen egal: Belastung = Ausgabe, Gutschrift = Einnahme.
+  mapSignLabel.hidden = Number(mapCredit.value) !== -1;
 }
 
-function populateMappingSelects(headers) {
-  currentImportHeaders = headers;
-  const dateIdx = findColumn(headers, DATE_KEYWORDS);
-  const descIdx = findColumn(headers, DESC_KEYWORDS);
-  const amountIdx = findColumn(headers, AMOUNT_KEYWORDS);
-
-  [['mapDate', dateIdx], ['mapDesc', descIdx], ['mapAmount', amountIdx]].forEach(([selectId, defaultIdx]) => {
-    const select = document.getElementById(selectId);
-    select.innerHTML = '';
-    headers.forEach((h, idx) => {
-      const opt = document.createElement('option');
-      opt.value = idx;
-      opt.textContent = h || `Spalte ${idx + 1}`;
-      select.appendChild(opt);
-    });
-    if (defaultIdx !== -1) select.value = defaultIdx;
+function fillHeaderSelect(select, headers, defaultIdx, optional) {
+  select.innerHTML = '';
+  if (optional) {
+    const none = document.createElement('option');
+    none.value = '-1';
+    none.textContent = '– keine –';
+    select.appendChild(none);
+  }
+  headers.forEach((h, idx) => {
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    opt.textContent = h || `Spalte ${idx + 1}`;
+    select.appendChild(opt);
   });
+  select.value = String(defaultIdx !== -1 ? defaultIdx : (optional ? -1 : 0));
+}
+
+function populateMappingSelects(table) {
+  currentImportHeaders = table.headers;
+  fillHeaderSelect(mapDate, table.headers, table.dateIdx, false);
+  fillHeaderSelect(mapDesc, table.headers, table.descIdx, false);
+  fillHeaderSelect(mapAmount, table.headers, table.amountIdx, false);
+  fillHeaderSelect(mapCredit, table.headers, table.creditIdx, true);
+  fillHeaderSelect(mapCategory, table.headers, table.categoryIdx, true);
   updateSignSuggestion();
 }
 
-function buildImportRows() {
-  const headers = importSheetRows[importHeaderRowIndex] || [];
-  const dataRows = importSheetRows.slice(importHeaderRowIndex + 1).filter(r => r.some(c => c !== '' && c != null));
-  const dateIdx = Number(document.getElementById('mapDate').value);
-  const descIdx = Number(document.getElementById('mapDesc').value);
-  const amountIdx = Number(document.getElementById('mapAmount').value);
-  const sign = document.getElementById('mapSign').value;
+function currentMapping() {
+  return {
+    dateIdx: Number(mapDate.value),
+    descIdx: Number(mapDesc.value),
+    amountIdx: Number(mapAmount.value),
+    creditIdx: Number(mapCredit.value),
+    categoryIdx: Number(mapCategory.value),
+    sign: mapSign.value,
+  };
+}
 
-  return dataRows.map(row => {
-    const date = toIsoDate(row[dateIdx]);
-    const description = String(row[descIdx] ?? '').trim();
-    const rawAmount = parseAmount(row[amountIdx]);
+// Die Spaltenwahl gilt für das erste Blatt; weitere Blätter werden über gleichlautende Titel
+// zugeordnet und fallen sonst auf ihre eigene automatische Erkennung zurück.
+function mappingForTable(table, primary, mapping) {
+  if (table === primary) return { ...mapping, typeIdx: table.typeIdx };
+  const byHeader = (idx, fallback) => {
+    if (idx === -1) return -1;
+    const name = String(primary.headers[idx] || '').toLowerCase();
+    const found = table.headers.findIndex(h => String(h || '').toLowerCase() === name);
+    return found !== -1 ? found : fallback;
+  };
+  return {
+    dateIdx: byHeader(mapping.dateIdx, table.dateIdx),
+    descIdx: byHeader(mapping.descIdx, table.descIdx),
+    amountIdx: byHeader(mapping.amountIdx, table.amountIdx),
+    creditIdx: byHeader(mapping.creditIdx, table.creditIdx),
+    categoryIdx: byHeader(mapping.categoryIdx, table.categoryIdx),
+    typeIdx: table.typeIdx,
+    sign: mapping.sign,
+  };
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function buildRowsForDetailTable(table, m) {
+  const dataRows = table.rows.slice(table.headerRowIndex + 1).filter(r => (r || []).some(c => c !== '' && c != null));
+  const parsed = dataRows.map((row, fileIndex) => {
+    const date = m.dateIdx !== -1 ? toIsoDate(row[m.dateIdx]) : null;
+    const description = m.descIdx !== -1 ? String(row[m.descIdx] ?? '').trim() : '';
+    const debit = m.amountIdx !== -1 ? parseAmount(row[m.amountIdx]) : null;
+    const credit = m.creditIdx !== -1 ? parseAmount(row[m.creditIdx]) : null;
     let amount = null;
-    if (rawAmount !== null) {
-      if (sign === 'negative' && rawAmount < 0) amount = Math.abs(rawAmount);
-      else if (sign === 'positive' && rawAmount > 0) amount = rawAmount;
-      else if (sign === 'all') amount = Math.abs(rawAmount);
+    let type = null;
+
+    if (m.creditIdx !== -1) {
+      // Getrennte Spalten: Belastung = Ausgabe, Gutschrift = Einnahme.
+      if (debit !== null && debit !== 0) { amount = Math.abs(debit); type = TX_EXPENSE; }
+      else if (credit !== null && credit !== 0) { amount = Math.abs(credit); type = TX_INCOME; }
+    } else if (debit !== null && debit !== 0) {
+      amount = Math.abs(debit);
+      if (m.sign === 'negative') type = debit < 0 ? TX_EXPENSE : TX_INCOME;
+      else if (m.sign === 'positive') type = debit > 0 ? TX_EXPENSE : TX_INCOME;
+      else if (m.sign === 'all_income') type = TX_INCOME;
+      else type = TX_EXPENSE;
     }
-    const valid = date && description && amount !== null && amount > 0;
-    const guess = valid ? guessCategory(description) : null;
+
+    // Eine ausdrückliche Typ-Spalte (z. B. aus dem eigenen Export) hat Vorrang.
+    if (m.typeIdx !== -1 && amount !== null) {
+      const tv = String(row[m.typeIdx] ?? '').toLowerCase();
+      if (/gutschrift|einnahme|income|credit/.test(tv)) type = TX_INCOME;
+      else if (/ausgabe|belastung|expense|debit/.test(tv)) type = TX_EXPENSE;
+    }
+
+    const fileCategoryRaw = m.categoryIdx !== -1 ? String(row[m.categoryIdx] ?? '').trim() : '';
+    const valid = !!(date && description && amount !== null && amount > 0 && type);
+    return { date, description, amount: valid ? round2(amount) : null, type, fileCategoryRaw, valid, fileIndex };
+  });
+
+  // Bankexporte listen meist das Neueste zuoberst → dann rückwärts durchnummerieren,
+  // damit Buchungen desselben Tages chronologisch bleiben.
+  const validRows = parsed.filter(r => r.valid);
+  const descending = validRows.length > 1 && validRows[0].date > validRows[validRows.length - 1].date;
+  const n = parsed.length;
+  parsed.forEach(r => { r.seq = descending ? (n - 1 - r.fileIndex) : r.fileIndex; });
+  return parsed;
+}
+
+const SUMMARY_SKIP_LABELS = /^(gesamt|total|summe|ausgaben|einnahmen|differenz|saldo|kategorie)/;
+
+function buildRowsForSummaryTable(table) {
+  const month = table.month;
+  const amountIdx = table.amountIdx !== -1 ? table.amountIdx : table.creditIdx;
+  const dataRows = table.rows.slice(table.headerRowIndex + 1);
+  return dataRows.map((row, i) => {
+    const label = String((row || [])[table.categoryIdx] ?? '').trim();
+    const amount = parseAmount((row || [])[amountIdx]);
+    const skip = !label || SUMMARY_SKIP_LABELS.test(label.toLowerCase());
+    const valid = !!(month && !skip && amount !== null && amount > 0);
     return {
-      date, description, amount: valid ? Math.round(amount * 100) / 100 : null,
-      category: guess ? guess.category : null,
-      uncertain: guess ? !guess.certain : false,
+      date: month ? `${month}-01` : null,
+      description: `Monatssumme ${label}`,
+      amount: valid ? round2(amount) : null,
+      type: TX_EXPENSE,
+      fileCategoryRaw: label,
       valid,
+      seq: i,
+      summary: true,
     };
   });
 }
 
+function buildImportRows() {
+  if (!importTables.length) return [];
+  const primary = importTables[0];
+  const mapping = primary.kind === 'summary' ? null : currentMapping();
+  const rows = [];
+  importTables.forEach((table, ti) => {
+    const tableRows = table.kind === 'summary'
+      ? buildRowsForSummaryTable(table)
+      : buildRowsForDetailTable(table, mappingForTable(table, primary, mapping));
+    tableRows.forEach(r => {
+      r.seq = ti * 1e6 + r.seq;
+      r.sheetName = table.sheetName;
+      rows.push(r);
+    });
+  });
+  return rows;
+}
+
+function renderImportSheetsInfo(rows) {
+  const el = document.getElementById('importSheetsInfo');
+  if (importTables.length <= 1 && !importSkippedSheets.length) { el.hidden = true; return; }
+  const parts = importTables.map(t => {
+    const count = rows.filter(r => r.valid && r.sheetName === t.sheetName).length;
+    if (t.kind === 'summary') return `${t.sheetName} (${t.month ? count + ' Summen' : 'kein Monat erkannt'})`;
+    return `${t.sheetName} (${count})`;
+  });
+  let text = `${importTables.length} Tabellenblätter erkannt: ${parts.join(', ')}`;
+  if (importSkippedSheets.length) text += ` · übersprungen: ${importSkippedSheets.join(', ')}`;
+  el.textContent = text;
+  el.hidden = false;
+}
+
+const TYPE_LABEL = { [TX_EXPENSE]: 'Ausgabe', [TX_INCOME]: 'Gutschrift' };
+
 function renderImportPreview() {
   const rows = buildImportRows();
-  const validRows = rows.filter(r => r.valid);
+  const validRows = rows.filter(r => r.valid).sort(compareChronological);
   const summary = document.getElementById('importSummary');
   const confirmBtn = document.getElementById('importConfirmBtn');
+  renderImportSheetsInfo(rows);
+
+  const resolved = validRows.map(r => ({ ...r, ...resolveRowCategory(r) }));
+  const expenses = resolved.filter(r => r.type === TX_EXPENSE).length;
+  const incomes = resolved.length - expenses;
+  const fromFile = resolved.filter(r => r.fromFile).length;
+  const toReview = resolved.filter(r => !r.certain).length;
+  const unknownNames = Array.from(new Set(resolved.filter(r => r.unknownName).map(r => r.unknownName)));
 
   if (!validRows.length) {
-    summary.textContent = `0 von ${rows.length} Zeilen erkannt. Prüfe die Spalten-Zuordnung und Vorzeichen-Logik oben.`;
+    summary.textContent = `0 von ${rows.length} Zeilen erkannt. Prüfe die Spalten-Zuordnung oben.`;
     summary.classList.add('import-summary-warning');
     confirmBtn.disabled = true;
   } else {
-    summary.textContent = `${validRows.length} von ${rows.length} Zeilen werden als Ausgabe erkannt.`;
-    summary.classList.remove('import-summary-warning');
+    const parts = [`${expenses} Ausgabe(n) und ${incomes} Gutschrift(en) erkannt (${rows.length} Zeilen)`];
+    if (fromFile) parts.push(`${fromFile} Kategorien aus der Datei übernommen`);
+    parts.push(toReview ? `${toReview} zu prüfen` : 'nichts zu prüfen');
+    if (unknownNames.length) parts.push(`unbekannte Kategorien: ${unknownNames.slice(0, 5).join(', ')}${unknownNames.length > 5 ? ', …' : ''}`);
+    summary.textContent = parts.join(' · ');
+    summary.classList.toggle('import-summary-warning', unknownNames.length > 0);
     confirmBtn.disabled = false;
   }
 
   const body = document.getElementById('importPreviewBody');
   body.innerHTML = '';
-  rows.slice(0, 10).forEach(r => {
+  const previewRows = resolved.length ? resolved.slice(0, 12) : rows.slice(0, 12);
+  previewRows.forEach(r => {
     const tr = document.createElement('tr');
     if (!r.valid) tr.style.opacity = '0.4';
     tr.innerHTML = `
-      <td>${r.date || '–'}</td>
+      <td>${r.date ? formatDate(r.date) : '–'}</td>
       <td>${escapeHtml(r.description || '–')}</td>
+      <td>${r.type ? TYPE_LABEL[r.type] : '–'}</td>
       <td>${r.amount !== null ? formatCurrency(r.amount) : '–'}</td>
-      <td>${r.category || '–'}${r.uncertain ? ' ⚠' : ''}</td>
+      <td>${r.category ? escapeHtml(r.category) : '–'}${r.valid && !r.certain ? ' ⚠' : ''}</td>
     `;
     body.appendChild(tr);
   });
 }
 
-['mapDate', 'mapDesc', 'mapSign'].forEach(id => {
-  document.getElementById(id).addEventListener('change', renderImportPreview);
+[mapDate, mapDesc, mapCategory, mapSign].forEach(select => {
+  select.addEventListener('change', renderImportPreview);
 });
-document.getElementById('mapAmount').addEventListener('change', () => {
-  updateSignSuggestion();
-  renderImportPreview();
+[mapAmount, mapCredit].forEach(select => {
+  select.addEventListener('change', () => {
+    updateSignSuggestion();
+    renderImportPreview();
+  });
 });
 
 const importDialog = document.getElementById('importDialog');
@@ -1296,14 +1845,35 @@ function parseCsvText(text) {
   return lines.map(line => splitCsvLine(line, delimiter));
 }
 
-function handleParsedRows(rows) {
-  if (!rows.length) {
-    showToast('Datei enthält keine Daten.');
+function collectTablesFromWorkbook(workbook, fileName) {
+  const tables = [];
+  const skipped = [];
+  workbook.SheetNames.forEach(name => {
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, raw: true, defval: '' });
+    const table = rows.length ? detectTable(rows, name) : null;
+    if (!table) { skipped.push(name); return; }
+    if (table.kind === 'summary') table.month = resolveSummaryMonth(name, fileName);
+    tables.push(table);
+  });
+  // Einzelbuchungen haben Vorrang vor blossen Monatssummen, sonst würde doppelt gezählt.
+  const detail = tables.filter(t => t.kind === 'detail');
+  if (detail.length) {
+    tables.filter(t => t.kind === 'summary').forEach(t => skipped.push(t.sheetName));
+    return { tables: detail, skipped };
+  }
+  return { tables, skipped };
+}
+
+function handleImportTables({ tables, skipped }) {
+  if (!tables.length) {
+    showToast('Keine passende Tabelle gefunden (Datum, Beschreibung und Betrag werden benötigt).');
     return;
   }
-  importSheetRows = rows;
-  importHeaderRowIndex = findHeaderRow(importSheetRows);
-  populateMappingSelects(importSheetRows[importHeaderRowIndex] || []);
+  importTables = tables;
+  importSkippedSheets = skipped;
+  const primary = tables[0];
+  document.getElementById('importMapping').hidden = primary.kind === 'summary';
+  if (primary.kind !== 'summary') populateMappingSelects(primary);
   renderImportPreview();
   importDialog.showModal();
 }
@@ -1320,7 +1890,9 @@ fileInput.addEventListener('change', () => {
   reader.onload = (e) => {
     try {
       if (isCsv) {
-        handleParsedRows(parseCsvText(e.target.result));
+        const rows = parseCsvText(e.target.result);
+        if (!rows.length) { showToast('Datei enthält keine Daten.'); return; }
+        handleImportTables({ tables: [detectTable(rows, file.name) || fallbackTable(rows, file.name)], skipped: [] });
       } else {
         const data = new Uint8Array(e.target.result);
         const workbook = XLSX.read(data, { type: 'array', cellDates: true });
@@ -1328,8 +1900,15 @@ fileInput.addEventListener('change', () => {
           showToast('Keine Tabelle in der Datei gefunden.');
           return;
         }
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        handleParsedRows(XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' }));
+        const result = collectTablesFromWorkbook(workbook, file.name);
+        if (!result.tables.length) {
+          const firstName = workbook.SheetNames[0];
+          const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstName], { header: 1, raw: true, defval: '' });
+          if (!rows.length) { showToast('Datei enthält keine Daten.'); return; }
+          result.tables = [fallbackTable(rows, firstName)];
+          result.skipped = workbook.SheetNames.slice(1);
+        }
+        handleImportTables(result);
       }
     } catch (err) {
       console.error('Import-Fehler:', err);
@@ -1345,13 +1924,14 @@ fileInput.addEventListener('change', () => {
 document.getElementById('importCancelBtn').addEventListener('click', () => importDialog.close());
 
 document.getElementById('importConfirmBtn').addEventListener('click', () => {
-  const rows = buildImportRows().filter(r => r.valid);
+  // Chronologisch verarbeiten, damit „x-mal hintereinander gleich zugeordnet“ auch der Reihe nach zählt.
+  const rows = buildImportRows().filter(r => r.valid).sort(compareChronological);
   const sessionCounts = new Map();
   const newUncertainIds = [];
   let added = 0, skipped = 0;
 
   rows.forEach(r => {
-    const keyBase = `${r.date}|${r.description}|${r.amount.toFixed(2)}`;
+    const keyBase = `${r.date}|${r.description}|${r.amount.toFixed(2)}${r.type === TX_INCOME ? '|+' : ''}`;
     const localIndex = sessionCounts.get(keyBase) || 0;
     sessionCounts.set(keyBase, localIndex + 1);
     const id = `${keyBase}#${localIndex}`;
@@ -1360,11 +1940,25 @@ document.getElementById('importConfirmBtn').addEventListener('click', () => {
       skipped++;
       return;
     }
-    transactions.push({ id, date: r.date, description: r.description, amount: r.amount, category: r.category, uncertain: r.uncertain });
-    if (r.uncertain) newUncertainIds.push(id);
+
+    const res = resolveRowCategory(r);
+    transactions.push({
+      id, date: r.date, description: r.description, amount: r.amount, type: r.type,
+      category: res.category, uncertain: !res.certain, reason: res.reason, streak: res.streak,
+      seq: r.seq, source: r.summary ? 'summary' : 'import',
+    });
+    if (!res.certain) newUncertainIds.push(id);
+
+    if (res.fromFile && !r.summary) {
+      // Zuordnungen aus der Datei sind verlässlich → sie zählen wie eine Bestätigung von Hand.
+      learnPattern(r.description, r.amount, res.category);
+    } else if (res.patternKey && (res.reason === 'pattern' || res.reason === 'pattern_probation')) {
+      countPatternAutoAssignment(res.patternKey);
+    }
     added++;
   });
 
+  savePatterns();
   saveTransactions();
 
   if (currentImportFileName) {
@@ -1376,9 +1970,10 @@ document.getElementById('importConfirmBtn').addEventListener('click', () => {
   }
 
   importDialog.close();
-  if (rows.length) currentMonth = rows[0].date.slice(0, 7);
+  if (rows.length) currentMonth = rows[rows.length - 1].date.slice(0, 7);
   render();
-  showToast(`${added} Ausgabe(n) importiert, ${skipped} bereits vorhanden.`);
+  renderPatternsList();
+  showToast(`${added} Eintrag/Einträge importiert, ${skipped} bereits vorhanden.`);
   if (newUncertainIds.length) openReviewDialog(newUncertainIds);
 });
 
@@ -1395,9 +1990,9 @@ function openReviewDialog(ids) {
     row.innerHTML = `
       <div class="tx-info">
         <span class="tx-desc">${escapeHtml(t.description)}</span>
-        <span class="tx-meta">${t.date} · ${formatCurrency(t.amount)}</span>
+        <span class="tx-meta">${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)}${isIncome(t) ? ' (Gutschrift)' : ''} · ${escapeHtml(reviewReasonText(t))}</span>
       </div>
-      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category)}</select>
+      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category, t.type)}</select>
     `;
     list.appendChild(row);
   });
@@ -1650,11 +2245,51 @@ function renderTeachRulesList() {
   `).join('') : '<p class="empty-state">Noch keine eigenen Regeln gelernt.</p>';
 }
 
-const TEACH_WELCOME_MESSAGE = 'Hallo! Ich bin kein echter KI-Chat, sondern ein einfacher Lern-Assistent: Ich merke mir Regeln wie „Aldi ist Verpflegung“ und wende sie danach automatisch an. Schreib mir einfach, was zu welcher Kategorie gehört.';
+// Liste der still gelernten Muster. Text+Betrag-Varianten werden nur gezeigt, wenn es keinen
+// reinen Text-Eintrag dazu gibt (sonst stünde jeder Händler doppelt drin).
+function visiblePatternEntries() {
+  return Object.entries(patterns)
+    .filter(([key]) => {
+      if (!key.startsWith('da:')) return true;
+      const base = key.slice(3, key.lastIndexOf('|'));
+      return !patterns[`d:${base}`];
+    })
+    .sort((a, b) => (b[1].streak - a[1].streak) || (b[1].updatedAt - a[1].updatedAt))
+    .slice(0, 60);
+}
+
+function renderPatternsList() {
+  const list = document.getElementById('patternsList');
+  const entries = visiblePatternEntries();
+  document.getElementById('patternCount').textContent = entries.length;
+  list.innerHTML = entries.length ? entries.map(([key, p]) => {
+    const trusted = isTrustedPattern(p);
+    const status = trusted ? `${p.streak}× · automatisch` : `${p.streak}/${PATTERN_AUTO_THRESHOLD}`;
+    return `
+      <span class="teach-rule-chip${trusted ? ' is-trusted' : ''}">
+        <span class="teach-rule-dot" style="background:${categoryColor(p.category)}"></span>
+        <span class="teach-rule-kw">${escapeHtml(p.label || key)}</span> → <span class="teach-rule-cat">${escapeHtml(p.category)}</span>
+        <span class="teach-rule-count">(${status})</span>
+        <button type="button" class="teach-rule-remove" data-pattern-key="${escapeHtml(key)}" aria-label="Muster ${escapeHtml(p.label || key)} vergessen">✕</button>
+      </span>
+    `;
+  }).join('') : '<p class="empty-state">Noch keine Muster gelernt — sie entstehen beim Zuordnen in den Karten oder Listen.</p>';
+}
+
+document.getElementById('patternsList').addEventListener('click', (e) => {
+  const btn = e.target.closest('.teach-rule-remove');
+  if (!btn) return;
+  forgetPattern(btn.dataset.patternKey);
+  renderPatternsList();
+  showToast('Muster vergessen.');
+});
+
+const TEACH_WELCOME_MESSAGE = 'Hallo! Ich bin kein echter KI-Chat, sondern ein einfacher Lern-Assistent: Ich merke mir feste Regeln wie „Aldi ist Verpflegung“ und wende sie danach automatisch an. Zusätzlich lernt die App aus deinen Zuordnungen: Ab fünf gleichen Zuordnungen hintereinander ordnet sie selbst zu – die ersten Male noch mit Rückfrage in den Karten.';
 
 if (!teachChatHistory.length) appendChatMessage('bot', TEACH_WELCOME_MESSAGE);
 else renderTeachChatLogFromHistory();
 renderTeachRulesList();
+renderPatternsList();
 
 document.getElementById('teachForm').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1682,6 +2317,7 @@ function exportBackup() {
     transactions,
     goals,
     learnedRules,
+    patterns,
     importLog,
     teachChatHistory,
     categorizationLog,
@@ -1712,9 +2348,10 @@ function importBackup(file) {
     }
     if (!confirm('Aktuelle Daten in diesem Browser werden durch das Backup ersetzt. Fortfahren?')) return;
 
-    transactions = data.transactions;
+    transactions = migrateTransactions(data.transactions);
     goals = data.goals && typeof data.goals === 'object' ? data.goals : { overall: null, categories: {} };
     learnedRules = data.learnedRules && typeof data.learnedRules === 'object' ? data.learnedRules : {};
+    patterns = data.patterns && typeof data.patterns === 'object' ? data.patterns : {};
     importLog = data.importLog && typeof data.importLog === 'object' ? data.importLog : {};
     teachChatHistory = Array.isArray(data.teachChatHistory) ? data.teachChatHistory : [];
     categorizationLog = Array.isArray(data.categorizationLog) ? data.categorizationLog : [];
@@ -1722,6 +2359,7 @@ function importBackup(file) {
     saveTransactions();
     saveGoals();
     saveLearnedRules();
+    savePatterns();
     saveImportLog();
     saveTeachChat();
     saveCategorizationLog();
@@ -1729,6 +2367,7 @@ function importBackup(file) {
     currentMonth = monthStrOf(new Date());
     render();
     renderTeachRulesList();
+    renderPatternsList();
     renderTeachChatLogFromHistory();
     showToast('Backup wiederhergestellt.');
   };

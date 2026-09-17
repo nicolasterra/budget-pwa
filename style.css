@@ -1101,3 +1101,47 @@ table.import-preview th {
   text-align: center;
   padding: 2rem 0;
 }
+
+/* ---- Gutschriften, Prüfgründe, Muster ---- */
+.tx-amount.is-income { color: var(--status-good); }
+.transaction-item.is-income { border-left: 3px solid var(--status-good); }
+.card-value-income { color: var(--status-good); }
+
+.history-income {
+  font-size: .75rem;
+  color: var(--status-good);
+  margin-top: .4rem;
+  text-align: left;
+}
+
+.review-card-reason {
+  font-size: .78rem;
+  color: var(--text-muted);
+  margin: -.2rem 0 .7rem;
+}
+
+.import-sheets-info {
+  font-size: .78rem;
+  color: var(--text-muted);
+  margin: -.4rem 0 .8rem;
+}
+
+.import-mapping label[hidden] { display: none; }
+
+.teach-patterns-list { max-height: 9rem; }
+.teach-rule-count { color: var(--text-muted); }
+.teach-rule-chip.is-trusted { border-color: var(--accent); }
+
+/* Dialoge: Breite am Dialog selbst festlegen, damit Inhalt + Innenabstand nie breiter als der Bildschirm werden */
+#importDialog, #reviewDialog, #categorizationLogDialog {
+  box-sizing: border-box;
+  width: min(92vw, 600px);
+}
+#importDialog .import-content, #reviewDialog .import-content, #categorizationLogDialog .import-content {
+  width: auto;
+}
+.import-mapping label { min-width: 0; }
+.import-mapping select { width: 100%; min-width: 0; }
+@media (max-width: 480px) {
+  .import-mapping { grid-template-columns: 1fr; }
+}
