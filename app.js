@@ -294,6 +294,10 @@ function compareChronological(a, b) {
   return a.date.localeCompare(b.date) || ((a.seq || 0) - (b.seq || 0)) || String(a.id).localeCompare(String(b.id));
 }
 
+function plural(count, singular, pluralForm) {
+  return `${count} ${count === 1 ? singular : pluralForm}`;
+}
+
 function formatDate(isoDate) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate || '');
   return m ? `${m[3]}.${m[2]}.${m[1]}` : (isoDate || '');
@@ -1325,13 +1329,13 @@ document.getElementById('clearMonthBtn').addEventListener('click', () => {
     return;
   }
   const label = formatMonthLabel(currentMonth);
-  if (!confirm(`${monthTx.length} Eintrag/Einträge aus ${label} wirklich löschen? Das kann nicht rückgängig gemacht werden.`)) return;
+  if (!confirm(`${plural(monthTx.length, 'Eintrag', 'Einträge')} aus ${label} wirklich löschen? Das kann nicht rückgängig gemacht werden.`)) return;
 
   const idsToRemove = new Set(monthTx.map(t => t.id));
   transactions = transactions.filter(t => !idsToRemove.has(t.id));
   saveTransactions();
   render();
-  showToast(`${monthTx.length} Eintrag/Einträge aus ${label} gelöscht.`);
+  showToast(`${plural(monthTx.length, 'Eintrag', 'Einträge')} aus ${label} gelöscht.`);
 });
 
 document.getElementById('transactionList').addEventListener('change', (e) => {
@@ -1770,7 +1774,7 @@ function renderImportPreview() {
     summary.classList.add('import-summary-warning');
     confirmBtn.disabled = true;
   } else {
-    const parts = [`${expenses} Ausgabe(n) und ${incomes} Gutschrift(en) erkannt (${rows.length} Zeilen)`];
+    const parts = [`${plural(expenses, 'Ausgabe', 'Ausgaben')} und ${plural(incomes, 'Gutschrift', 'Gutschriften')} erkannt (${rows.length} Zeilen)`];
     if (fromFile) parts.push(`${fromFile} Kategorien aus der Datei übernommen`);
     parts.push(toReview ? `${toReview} zu prüfen` : 'nichts zu prüfen');
     if (unknownNames.length) parts.push(`unbekannte Kategorien: ${unknownNames.slice(0, 5).join(', ')}${unknownNames.length > 5 ? ', …' : ''}`);
@@ -1973,7 +1977,7 @@ document.getElementById('importConfirmBtn').addEventListener('click', () => {
   if (rows.length) currentMonth = rows[rows.length - 1].date.slice(0, 7);
   render();
   renderPatternsList();
-  showToast(`${added} Eintrag/Einträge importiert, ${skipped} bereits vorhanden.`);
+  showToast(`${plural(added, 'Eintrag', 'Einträge')} importiert, ${skipped} bereits vorhanden.`);
   if (newUncertainIds.length) openReviewDialog(newUncertainIds);
 });
 
@@ -2202,7 +2206,7 @@ function handleTeachInput(raw) {
     case 'learn': {
       const { isNew, previousCategory } = teachRule(result.keyword, result.category, result.label);
       const updated = applyRuleRetroactively(result.keyword, result.category);
-      const note = updated > 0 ? ` ${updated} bestehende, unsichere Ausgabe(n) wurden entsprechend aktualisiert.` : '';
+      const note = updated > 0 ? ` ${plural(updated, 'bestehende unsichere Ausgabe wurde', 'bestehende unsichere Ausgaben wurden')} entsprechend aktualisiert.` : '';
       if (isNew) return `Gelernt: „${result.label}“ → ${result.category}.${note}`;
       if (previousCategory === result.category) return `Diese Regel war schon so gespeichert: „${result.label}“ → ${result.category}.${note}`;
       return `Regel aktualisiert: „${result.label}“ gehört jetzt zu ${result.category} (vorher: ${previousCategory}).${note}`;
@@ -2310,6 +2314,128 @@ document.getElementById('teachRulesList').addEventListener('click', (e) => {
   appendChatMessage('bot', `Regel für „${btn.dataset.keyword}“ gelöscht.`);
 });
 
+// ---- Monatliche Erinnerung ---------------------------------------------------
+// Erscheint einmal pro Kalendermonat, beim ersten Öffnen der App im neuen Monat.
+const REMINDER_MONTH_KEY = 'budget_reminder_month';
+const LAST_BACKUP_KEY = 'budget_last_backup';
+
+const MONTHLY_QUOTES = [
+  'Ein neuer Monat. Dein Konto hat Neuigkeiten.',
+  'Der letzte Monat ist abgerechnet — willst du wissen, wie er ausgegangen ist?',
+  'Zahlen lügen nicht. Aber sie schweigen, solange du sie nicht fragst.',
+  'Wer weiss, wohin sein Geld geht, muss es nicht suchen.',
+  'Auszug holen, hochladen, durchwischen. Geht schneller als ein Kaffee.',
+  'Sparen fängt nicht beim Verzichten an, sondern beim Hinschauen.',
+  'Ein Monat ohne Überblick ist ein Monat im Blindflug.',
+  'Der beste Zeitpunkt war der Erste. Der zweitbeste ist jetzt.',
+  'Dein Geld war einen Monat lang unterwegs. Zeit für den Reisebericht.',
+  'Backup gemacht, Auszug geladen, Kopf frei.',
+  'Ein Budget ist kein Verbot. Es ist Wissen.',
+  'Kleine Beträge sind wie Krümel: Man sieht sie erst, wenn man auf den Boden schaut.',
+];
+
+// Fest pro Monat gewählt, damit der Spruch beim Neuladen derselbe bleibt.
+function monthlyQuote(monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  return MONTHLY_QUOTES[(y * 12 + m) % MONTHLY_QUOTES.length];
+}
+
+function parseBackupDate(isoDate) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || ''));
+  if (!m) return Date.now();
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12).getTime();
+}
+
+function getLastBackupTime() {
+  try {
+    const n = Number(localStorage.getItem(LAST_BACKUP_KEY));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch { return null; }
+}
+
+function setLastBackupTime(ts) {
+  try { localStorage.setItem(LAST_BACKUP_KEY, String(ts || Date.now())); } catch {}
+}
+
+function daysSince(ts) {
+  return Math.floor((Date.now() - ts) / 86400000);
+}
+
+function formatDaysAgo(ts) {
+  const d = daysSince(ts);
+  if (d <= 0) return 'heute';
+  if (d === 1) return 'gestern';
+  return `vor ${d} Tagen`;
+}
+
+function buildReminderChecklist(previousMonth) {
+  const items = [];
+
+  const backupTs = getLastBackupTime();
+  if (!backupTs) {
+    items.push({ level: 'critical', text: 'Noch nie ein Backup gespeichert.' });
+  } else {
+    const d = daysSince(backupTs);
+    items.push({
+      level: d > 45 ? 'critical' : d > 20 ? 'warning' : 'good',
+      text: `Letztes Backup: ${formatDaysAgo(backupTs)}.`,
+    });
+  }
+
+  const entry = importLog[previousMonth];
+  items.push(entry
+    ? { level: 'good', text: `${formatMonthLabel(previousMonth)}: importiert aus ${entry.filename}.` }
+    : { level: 'warning', text: `${formatMonthLabel(previousMonth)}: noch keine Datei importiert.` });
+
+  const open = getReviewQueue().length;
+  if (open) items.push({ level: 'warning', text: `${plural(open, 'Eintrag wartet', 'Einträge warten')} auf deine Zuordnung.` });
+
+  return items;
+}
+
+const monthlyReminderDialog = document.getElementById('monthlyReminderDialog');
+
+function renderReminderChecklist(previousMonth) {
+  document.getElementById('reminderChecklist').innerHTML = buildReminderChecklist(previousMonth).map(item => `
+    <div class="reminder-item status-${item.level}">
+      <span class="reminder-item-icon">${GOAL_ICONS[item.level]}</span>
+      <span>${escapeHtml(item.text)}</span>
+    </div>
+  `).join('');
+}
+
+function openMonthlyReminder(monthStr) {
+  const previousMonth = shiftMonth(monthStr, -1);
+  document.getElementById('reminderKicker').textContent = `${formatMonthLabel(monthStr)} — neuer Monat`;
+  document.getElementById('reminderQuote').textContent = monthlyQuote(monthStr);
+  renderReminderChecklist(previousMonth);
+  monthlyReminderDialog.dataset.previousMonth = previousMonth;
+  monthlyReminderDialog.showModal();
+}
+
+function maybeShowMonthlyReminder() {
+  if (!transactions.length) return;          // Frische Installation nicht gleich vollquatschen.
+  const nowMonth = monthStrOf(new Date());
+  let stored = null;
+  try { stored = localStorage.getItem(REMINDER_MONTH_KEY); } catch {}
+  if (stored === nowMonth) return;
+  try { localStorage.setItem(REMINDER_MONTH_KEY, nowMonth); } catch {}
+  openMonthlyReminder(nowMonth);
+}
+
+document.getElementById('reminderBackupBtn').addEventListener('click', () => {
+  exportBackup();
+  renderReminderChecklist(monthlyReminderDialog.dataset.previousMonth);
+});
+
+document.getElementById('reminderImportBtn').addEventListener('click', () => {
+  monthlyReminderDialog.close();
+  setActiveTab('panel-transactions');
+  document.getElementById('fileInput').click();
+});
+
+document.getElementById('reminderCloseBtn').addEventListener('click', () => monthlyReminderDialog.close());
+
 function exportBackup() {
   const data = {
     version: 1,
@@ -2329,6 +2455,7 @@ function exportBackup() {
   a.download = `budget-backup-${localIsoDate(new Date())}.json`;
   a.click();
   URL.revokeObjectURL(url);
+  setLastBackupTime(Date.now());
   showToast('Backup heruntergeladen.');
 }
 
@@ -2363,6 +2490,9 @@ function importBackup(file) {
     saveImportLog();
     saveTeachChat();
     saveCategorizationLog();
+
+    // Nach dem Wiederherstellen liegen die Daten nachweislich in dieser Datei – das zählt als Backup.
+    setLastBackupTime(parseBackupDate(data.exportedAt));
 
     currentMonth = monthStrOf(new Date());
     render();
@@ -2437,3 +2567,4 @@ document.getElementById('tabBar').addEventListener('keydown', (e) => {
 setActiveTab(loadActiveTab());
 
 render();
+maybeShowMonthlyReminder();

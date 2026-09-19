@@ -330,6 +330,25 @@
   </div>
 </dialog>
 
+<dialog id="monthlyReminderDialog">
+  <div class="reminder-content">
+    <p class="reminder-kicker" id="reminderKicker"></p>
+    <h2 class="reminder-quote" id="reminderQuote"></h2>
+    <div id="reminderChecklist" class="reminder-checklist"></div>
+    <div class="reminder-actions">
+      <button type="button" id="reminderImportBtn" class="btn-primary">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3M6 7l4-4 4 4"/><path d="M3.5 13v2.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V13"/></svg>
+        Auszug hochladen
+      </button>
+      <button type="button" id="reminderBackupBtn" class="btn-secondary">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10M6 9l4 4 4-4"/><path d="M3.5 15v1.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V15"/></svg>
+        Backup sichern
+      </button>
+    </div>
+    <button type="button" id="reminderCloseBtn" class="btn-link reminder-close">Nicht jetzt</button>
+  </div>
+</dialog>
+
 <dialog id="addDialog">
   <form id="addForm">
     <h2>Neuer Eintrag</h2>

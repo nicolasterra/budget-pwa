@@ -1145,3 +1145,85 @@ table.import-preview th {
 @media (max-width: 480px) {
   .import-mapping { grid-template-columns: 1fr; }
 }
+
+/* ---- Monatliche Erinnerung ---- */
+#monthlyReminderDialog {
+  box-sizing: border-box;
+  width: min(92vw, 440px);
+}
+
+.reminder-content {
+  display: flex;
+  flex-direction: column;
+  gap: .9rem;
+}
+
+.reminder-kicker {
+  margin: 0;
+  font-size: .72rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.reminder-quote {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.32rem;
+  line-height: 1.3;
+  font-weight: 700;
+}
+
+.reminder-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+}
+
+.reminder-item {
+  display: flex;
+  align-items: flex-start;
+  gap: .55rem;
+  font-size: .86rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .55rem .7rem;
+}
+
+.reminder-item-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .7rem;
+  font-weight: 700;
+  color: #fff;
+  margin-top: .05rem;
+}
+
+.reminder-item.status-good .reminder-item-icon { background: var(--status-good); }
+.reminder-item.status-warning .reminder-item-icon { background: var(--status-warning); color: #2b1d00; }
+.reminder-item.status-critical .reminder-item-icon { background: var(--status-critical); }
+.reminder-item.status-warning { border-color: var(--status-warning); }
+.reminder-item.status-critical { border-color: var(--status-critical); }
+
+.reminder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .6rem;
+}
+
+.reminder-actions .btn-primary, .reminder-actions .btn-secondary {
+  flex: 1 1 auto;
+  min-width: 10rem;
+}
+
+.reminder-close {
+  align-self: center;
+  font-size: .82rem;
+}
