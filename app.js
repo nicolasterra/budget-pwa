@@ -30,6 +30,18 @@ const TX_INCOME = 'income';
 function isExpense(t) { return t.type !== TX_INCOME; }
 function isIncome(t) { return t.type === TX_INCOME; }
 
+// Umbuchungen aufs eigene Konto sind kein Verbrauch: Sie werden angezeigt, zählen aber
+// weder ins Ausgaben-Total noch in die Budget-Ziele.
+const NON_SPENDING_CATEGORIES = new Set(['Konto Übertragung']);
+
+function countsAsSpending(t) {
+  return isExpense(t) && !NON_SPENDING_CATEGORIES.has(t.category);
+}
+
+function isTransfer(t) {
+  return isExpense(t) && NON_SPENDING_CATEGORIES.has(t.category);
+}
+
 const CATEGORY_KEYWORDS = {
   'Konto Übertragung': ['übertrag', 'uebertrag'],
   'Verpflegung': ['lidl', 'migros', 'aldi', 'coop', 'denner', 'volg', 'spar', 'migrolino', 'mcdonald', 'restaurant', 'kebab', 'markthof', 'pronto'],
@@ -303,8 +315,25 @@ function formatDate(isoDate) {
   return m ? `${m[3]}.${m[2]}.${m[1]}` : (isoDate || '');
 }
 
+// Läuft der Browserspeicher voll, darf das nicht stillschweigend passieren.
+let storageWarned = false;
+
+function safeSetItem(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (err) {
+    console.error('Speichern fehlgeschlagen:', err);
+    if (!storageWarned) {
+      storageWarned = true;
+      setTimeout(() => showToast('Speicher voll — bitte ein Backup sichern und alte Monate löschen.'), 0);
+    }
+    return false;
+  }
+}
+
 function saveTransactions() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+  safeSetItem(STORAGE_KEY, JSON.stringify(transactions));
 }
 
 function formatCurrency(amount) {
@@ -336,13 +365,17 @@ function sumAmounts(list) {
   return list.reduce((sum, t) => sum + t.amount, 0);
 }
 
-// Ausgaben-Total des Monats (Gutschriften zählen nicht dazu).
+// Ausgaben-Total des Monats: ohne Gutschriften und ohne Konto-Übertragungen.
 function getMonthTotal(monthStr) {
-  return sumAmounts(monthTransactionsOf(monthStr).filter(isExpense));
+  return sumAmounts(monthTransactionsOf(monthStr).filter(countsAsSpending));
 }
 
 function getMonthIncome(monthStr) {
   return sumAmounts(monthTransactionsOf(monthStr).filter(isIncome));
+}
+
+function getMonthTransfers(monthStr) {
+  return sumAmounts(monthTransactionsOf(monthStr).filter(isTransfer));
 }
 
 function getMonthDelta(monthStr) {
@@ -385,10 +418,17 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Für Werte in Attributen: escapeHtml lässt Anführungszeichen stehen, weil sie in
+// Textknoten harmlos sind. In einem Attribut würden sie es vorzeitig beenden — und
+// Buchungstexte der Bank enthalten durchaus welche.
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function buildCategoryOptions(selected, type) {
   const list = selectableCategories(type);
   if (selected && !list.some(c => c.name === selected)) list.push({ name: selected, color: categoryColor(selected) });
-  return list.map(c => `<option value="${escapeHtml(c.name)}" ${c.name === selected ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+  return list.map(c => `<option value="${escapeAttr(c.name)}" ${c.name === selected ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
 }
 
 const CATEGORIZATION_LOG_KEY = 'budget_categorization_log';
@@ -484,77 +524,137 @@ function goalStatus(spent, goal) {
   return { spent, goal, pct, displayPct, level: 'critical' };
 }
 
+// Gründe, die eine echte Lücke bedeuten (rot) statt nur einen unbestätigten Vorschlag (gelb).
+const URGENT_REASONS = new Set(['no_match', 'unknown_file_category']);
+
+function isUrgent(t) {
+  return URGENT_REASONS.has(t.reason) || t.category === FALLBACK_CATEGORY;
+}
+
+// Ein Balken wird über scaleX animiert; der Endwert steckt in der Breite.
+function barMarkup(className, pct, color) {
+  const style = `width:${pct}%${color ? `; background:${color}` : ''}`;
+  return `<div class="${className}" style="${style}"></div>`;
+}
+
 function render() {
   document.getElementById('currentMonthLabel').textContent = formatMonthLabel(currentMonth);
 
   const monthTx = getMonthTransactions();
-  const expenses = monthTx.filter(isExpense);
-  const total = sumAmounts(expenses);
+  const spending = monthTx.filter(countsAsSpending);
+  const total = sumAmounts(spending);
+  const income = sumAmounts(monthTx.filter(isIncome));
+  const transfers = sumAmounts(monthTx.filter(isTransfer));
+
   const { currency, number } = formatCurrencyParts(total);
   document.getElementById('heroCurrency').textContent = currency;
-  document.getElementById('heroValue').textContent = number;
+  animateHeroValue(number, total);
   document.getElementById('txCount').textContent = monthTx.length;
-  document.getElementById('monthIncome').textContent = formatCurrency(sumAmounts(monthTx.filter(isIncome)));
+  document.getElementById('monthIncome').textContent = formatCurrency(income);
+
+  const transferCard = document.getElementById('transferCard');
+  transferCard.hidden = transfers <= 0;
+  document.getElementById('monthTransfers').textContent = formatCurrency(transfers);
+
+  document.getElementById('welcomeCard').hidden = transactions.length > 0;
   renderHeroDelta(currentMonth);
 
+  // Gezählte und nicht gezählte Kategorien getrennt ausweisen.
   const byCategory = {};
-  expenses.forEach(t => {
+  monthTx.filter(isExpense).forEach(t => {
     byCategory[t.category] = (byCategory[t.category] || 0) + t.amount;
   });
-  const sortedCategories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
-  document.getElementById('topCategory').textContent = sortedCategories.length ? sortedCategories[0][0] : '–';
+  const entries = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+  const counted = entries.filter(([name]) => !NON_SPENDING_CATEGORIES.has(name));
+  const aside = entries.filter(([name]) => NON_SPENDING_CATEGORIES.has(name));
 
-  const maxCategoryAmount = sortedCategories.length ? sortedCategories[0][1] : 0;
+  document.getElementById('topCategory').textContent = counted.length ? counted[0][0] : '–';
+
+  const maxAmount = counted.length ? counted[0][1] : 0;
   const categoryListEl = document.getElementById('categoryList');
-  categoryListEl.innerHTML = '';
-  if (!sortedCategories.length) {
-    categoryListEl.innerHTML = '<p class="empty-state">Noch keine Daten für diesen Monat.</p>';
-  } else {
-    sortedCategories.forEach(([name, amount]) => {
-      const pct = maxCategoryAmount ? (amount / maxCategoryAmount) * 100 : 0;
-      const row = document.createElement('div');
-      row.className = 'category-row';
-      row.innerHTML = `
-        <div class="category-row-top">
-          <span>${escapeHtml(name)}</span>
-          <span>${formatCurrency(amount)}</span>
-        </div>
-        <div class="category-bar-track">
-          <div class="category-bar-fill" style="width:${pct}%; background:${categoryColor(name)}"></div>
-        </div>
-      `;
-      categoryListEl.appendChild(row);
-    });
-  }
+  categoryListEl.innerHTML = counted.length
+    ? counted.map(([name, amount], i) => `
+        <div class="category-row" style="--i:${i}">
+          <div class="category-row-top">
+            <span>${escapeHtml(name)}</span>
+            <span>${formatCurrency(amount)}</span>
+          </div>
+          <div class="category-bar-track">
+            ${barMarkup('category-bar-fill', maxAmount ? (amount / maxAmount) * 100 : 0, categoryColor(name))}
+          </div>
+        </div>`).join('')
+    : '<p class="empty-state">Noch keine Daten für diesen Monat.</p>';
+
+  document.getElementById('categoryAsideWrap').hidden = aside.length === 0;
+  document.getElementById('categoryAside').innerHTML = aside.map(([name, amount]) => `
+    <div class="category-row is-aside">
+      <div class="category-row-top">
+        <span>${escapeHtml(name)}</span>
+        <span>${formatCurrency(amount)}</span>
+      </div>
+    </div>`).join('');
 
   renderGoalsSection(total, byCategory);
   renderImportSourceInfo();
   renderHistoryList();
   renderReviewQueue();
+  renderBackupStatus();
 
   const txListEl = document.getElementById('transactionList');
-  const emptyState = document.getElementById('emptyState');
-  txListEl.innerHTML = '';
-  emptyState.hidden = monthTx.length > 0;
-  monthTx.forEach(t => {
-    const income = isIncome(t);
-    const item = document.createElement('div');
-    item.className = 'transaction-item' + (t.uncertain ? ' needs-category' : '') + (income ? ' is-income' : '');
-    const metaParts = [formatDate(t.date)];
-    if (income) metaParts.push('Gutschrift');
-    if (t.uncertain) metaParts.push(reviewReasonText(t));
-    item.innerHTML = `
-      <span class="tx-dot" style="background:${categoryColor(t.category)}"></span>
-      <div class="tx-info">
-        <span class="tx-desc">${escapeHtml(t.description)}</span>
-        <span class="tx-meta">${escapeHtml(metaParts.join(' · '))}</span>
-      </div>
-      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category, t.type)}</select>
-      <span class="tx-amount${income ? ' is-income' : ''}">${income ? '+ ' : ''}${formatCurrency(t.amount)}</span>
-      <button class="tx-delete" data-id="${t.id}" aria-label="Löschen">✕</button>
-    `;
-    txListEl.appendChild(item);
-  });
+  document.getElementById('emptyState').hidden = monthTx.length > 0;
+  txListEl.innerHTML = monthTx.map((t, i) => {
+    const credit = isIncome(t);
+    const classes = ['transaction-item'];
+    if (t.uncertain) classes.push('needs-category');
+    if (t.uncertain && isUrgent(t)) classes.push('is-urgent');
+    if (credit) classes.push('is-income');
+    const meta = [formatDate(t.date)];
+    if (credit) meta.push('Gutschrift');
+    if (isTransfer(t)) meta.push('zählt nicht ins Total');
+    if (t.uncertain) meta.push(reviewReasonText(t));
+    return `
+      <div class="${classes.join(' ')}" style="--i:${i}">
+        <span class="tx-dot" style="background:${categoryColor(t.category)}"></span>
+        <div class="tx-info">
+          <span class="tx-desc">${escapeHtml(t.description)}</span>
+          <span class="tx-meta">${escapeHtml(meta.join(' · '))}</span>
+        </div>
+        <select class="tx-category-select" data-id="${escapeAttr(t.id)}" aria-label="Kategorie für ${escapeAttr(t.description)}">${buildCategoryOptions(t.category, t.type)}</select>
+        <span class="tx-amount${credit ? ' is-income' : ''}">${credit ? '+ ' : ''}${formatCurrency(t.amount)}</span>
+        <button type="button" class="tx-delete" data-id="${escapeAttr(t.id)}" aria-label="Eintrag ${escapeAttr(t.description)} löschen">✕</button>
+      </div>`;
+  }).join('');
+}
+
+// Die grosse Zahl zählt weich auf den neuen Wert hoch, statt zu springen.
+let heroAnim = { value: null, frame: 0 };
+
+function animateHeroValue(text, value) {
+  const el = document.getElementById('heroValue');
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const from = heroAnim.value;
+  heroAnim.value = value;
+
+  if (reduce || from === null || from === value || document.hidden) {
+    cancelAnimationFrame(heroAnim.frame);
+    el.textContent = text;
+    return;
+  }
+
+  cancelAnimationFrame(heroAnim.frame);
+  const start = performance.now();
+  const duration = 480;
+  const step = (now) => {
+    const p = Math.min((now - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - p, 3);
+    if (p < 1) {
+      el.textContent = formatCurrencyParts(from + (value - from) * eased).number;
+      heroAnim.frame = requestAnimationFrame(step);
+    } else {
+      el.textContent = text;
+    }
+  };
+  heroAnim.frame = requestAnimationFrame(step);
 }
 
 function renderHeroDelta(monthStr) {
@@ -604,8 +704,8 @@ function renderGoalsSection(total, byCategory) {
     return;
   }
   emptyEl.hidden = true;
-  listEl.innerHTML = allRows.map(r => `
-    <div class="goal-row status-${r.level}">
+  listEl.innerHTML = allRows.map((r, i) => `
+    <div class="goal-row status-${r.level}" style="--i:${i}">
       <div class="goal-row-top">
         <span class="goal-name">${escapeHtml(r.name)}</span>
         <span class="goal-status-badge status-${r.level}">
@@ -614,8 +714,8 @@ function renderGoalsSection(total, byCategory) {
       </div>
       <div class="goal-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
            aria-valuenow="${Math.round(r.displayPct)}"
-           aria-label="${escapeHtml(r.name)}: ${Math.round(r.pct)}% des Ziels, ${GOAL_LABELS[r.level]}">
-        <div class="goal-fill status-fill-${r.level}" style="width:${r.displayPct}%"></div>
+           aria-label="${escapeAttr(r.name)}: ${Math.round(r.pct)}% des Ziels, ${GOAL_LABELS[r.level]}">
+        ${barMarkup(`goal-fill status-fill-${r.level}`, r.displayPct)}
       </div>
       <div class="goal-numbers">
         <span>${formatCurrency(r.spent)} von ${formatCurrency(r.goal)}</span>
@@ -645,17 +745,17 @@ function renderHistoryList() {
     return;
   }
   emptyEl.hidden = true;
-  listEl.innerHTML = totals.map(({ month, total, income }) => {
+  listEl.innerHTML = totals.map(({ month, total, income }, i) => {
     const pct = maxTotal ? (total / maxTotal) * 100 : 0;
     const isCurrent = month === currentMonth;
     return `
-      <button type="button" class="history-row${isCurrent ? ' is-current' : ''}" data-month="${month}">
+      <button type="button" class="history-row${isCurrent ? ' is-current' : ''}" data-month="${month}" style="--i:${i}"${isCurrent ? ' aria-current="true"' : ''}>
         <div class="history-row-top">
           <span class="history-month">${formatMonthLabel(month)}${isCurrent ? '<span class="history-current-tag">ausgewählt</span>' : ''}</span>
           <span>${formatCurrency(total)}</span>
         </div>
         <div class="history-bar-track">
-          <div class="history-bar-fill" style="width:${pct}%"></div>
+          ${barMarkup('history-bar-fill', pct)}
         </div>
         ${income > 0 ? `<div class="history-income">Gutschriften: + ${formatCurrency(income)}</div>` : ''}
       </button>
@@ -674,8 +774,15 @@ function renderReviewQueue() {
   const emptyEl = document.getElementById('reviewQueueEmptyState');
   const badge = document.getElementById('reviewTabBadge');
 
+  // Kurzes Aufpoppen, wenn die Zahl sich ändert – sonst übersieht man neue Aufgaben.
+  const previous = badge.textContent;
   badge.hidden = queue.length === 0;
   badge.textContent = queue.length;
+  if (!badge.hidden && previous !== String(queue.length)) {
+    badge.classList.remove('is-bumped');
+    void badge.offsetWidth;
+    badge.classList.add('is-bumped');
+  }
   document.getElementById('startReviewSessionBtn').disabled = queue.length === 0;
 
   if (!queue.length) {
@@ -684,14 +791,14 @@ function renderReviewQueue() {
     return;
   }
   emptyEl.hidden = true;
-  listEl.innerHTML = queue.map(t => `
-    <div class="review-row">
+  listEl.innerHTML = queue.map((t, i) => `
+    <div class="review-row${isUrgent(t) ? ' is-urgent' : ''}" style="--i:${i}">
       <div class="tx-info">
         <span class="tx-desc">${escapeHtml(t.description)}</span>
         <span class="tx-meta">${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)}${isIncome(t) ? ' (Gutschrift)' : ''} · ${escapeHtml(reviewReasonText(t))}</span>
       </div>
-      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category, t.type)}</select>
-      <button class="tx-delete" data-id="${t.id}" aria-label="Löschen">✕</button>
+      <select class="tx-category-select" data-id="${escapeAttr(t.id)}" aria-label="Kategorie für ${escapeAttr(t.description)}">${buildCategoryOptions(t.category, t.type)}</select>
+      <button type="button" class="tx-delete" data-id="${escapeAttr(t.id)}" aria-label="Eintrag ${escapeAttr(t.description)} löschen">✕</button>
     </div>
   `).join('');
 }
@@ -739,6 +846,8 @@ function renderReviewCard() {
   }
   document.getElementById('reviewSessionProgress').textContent =
     `${reviewSession.index + 1} / ${reviewSession.ids.length}`;
+  document.getElementById('reviewProgressFill').style.width =
+    `${(reviewSession.index / reviewSession.ids.length) * 100}%`;
   document.getElementById('reviewCardDesc').textContent = t.description;
   document.getElementById('reviewCardMeta').textContent =
     `${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)} · ${isIncome(t) ? 'Gutschrift' : 'Ausgabe'}`;
@@ -748,7 +857,7 @@ function renderReviewCard() {
   badge.style.background = categoryColor(t.category);
 
   document.getElementById('reviewChipGrid').innerHTML = selectableCategories(t.type).map(c => `
-    <button type="button" class="review-chip" data-category="${escapeHtml(c.name)}">
+    <button type="button" class="review-chip" data-category="${escapeAttr(c.name)}">
       <span class="review-chip-dot" style="background:${c.color}"></span>${escapeHtml(c.name)}
     </button>
   `).join('');
@@ -769,6 +878,7 @@ function finishReviewSession() {
   document.getElementById('reviewCardStack').hidden = true;
   document.getElementById('reviewChipGrid').hidden = true;
   document.getElementById('reviewSessionDone').hidden = false;
+  document.getElementById('reviewProgressFill').style.width = '100%';
   updateReviewNavButtons();
 }
 
@@ -917,6 +1027,14 @@ reviewCard.addEventListener('pointerup', () => {
   }
 });
 
+// Bricht die Geste ab (z. B. eingehender Anruf), darf die Karte nicht schief hängen bleiben.
+reviewCard.addEventListener('pointercancel', () => {
+  if (!cardDrag) return;
+  cardDrag = null;
+  reviewCard.classList.remove('dragging');
+  resetCardPosition();
+});
+
 const categorizationLogDialog = document.getElementById('categorizationLogDialog');
 const MAX_CATEGORIZATION_LOG_SHOWN = 100;
 
@@ -960,12 +1078,17 @@ function openCategorizationLogDialog() {
 
 document.getElementById('categorizationLogBtn').addEventListener('click', openCategorizationLogDialog);
 document.getElementById('categorizationLogCloseBtn').addEventListener('click', () => categorizationLogDialog.close());
-document.getElementById('categorizationLogClearBtn').addEventListener('click', () => {
+document.getElementById('categorizationLogClearBtn').addEventListener('click', async () => {
   if (!categorizationLog.length) {
     showToast('Zuordnungsverlauf ist bereits leer.');
     return;
   }
-  if (!confirm('Zuordnungsverlauf wirklich leeren? Das kann nicht rückgängig gemacht werden.')) return;
+  const ok = await askConfirm({
+    title: 'Verlauf leeren?',
+    text: 'Der Zuordnungsverlauf wird vollständig gelöscht. Deine Ausgaben und Kategorien bleiben unverändert.',
+    confirmLabel: 'Leeren',
+  });
+  if (!ok) return;
   categorizationLog = [];
   saveCategorizationLog();
   renderCategorizationLog();
@@ -1034,8 +1157,10 @@ function buildMonthSheet(monthStr) {
 
   const byCategory = {};
   expenses.forEach(t => { byCategory[t.category] = (byCategory[t.category] || 0) + t.amount; });
-  const categoryRows = CATEGORIES.filter(c => byCategory[c.name]);
-  const expenseTotal = sumAmounts(expenses);
+  // Konto-Übertragungen stehen unterhalb des Totals, damit die Summe sie nicht erfasst.
+  const categoryRows = CATEGORIES.filter(c => byCategory[c.name] && !NON_SPENDING_CATEGORIES.has(c.name));
+  const asideRows = CATEGORIES.filter(c => byCategory[c.name] && NON_SPENDING_CATEGORIES.has(c.name));
+  const expenseTotal = sumAmounts(monthTx.filter(countsAsSpending));
   const incomeTotal = sumAmounts(monthTx.filter(isIncome));
 
   const aoa = [];
@@ -1060,11 +1185,21 @@ function buildMonthSheet(monthStr) {
   const differenzRow = aoa.length;
   aoa.push(['DIFFERENZ', incomeTotal - expenseTotal]);
 
+  const asideEntries = [];
+  if (asideRows.length) {
+    aoa.push([]);
+    aoa.push(['NICHT IM TOTAL']);
+    asideRows.forEach(c => {
+      asideEntries.push({ r: aoa.length, name: c.name, value: byCategory[c.name] });
+      aoa.push([c.name, byCategory[c.name]]);
+    });
+  }
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 22 }, { wch: 15 }];
   ws['!merges'] = merges;
 
-  catRowEntries.forEach(entry => {
+  [...catRowEntries, ...asideEntries].forEach(entry => {
     setComputedCell(ws, entry.r, 1, expenseSumFormula(monthStr, entry.name), entry.value, CHF_FMT);
   });
 
@@ -1086,13 +1221,15 @@ function buildOverviewSheet(orderedMonths) {
   const pctColIdx = totalColIdx + 1;
   const totalCols = pctColIdx + 1;
 
-  const categoryData = CATEGORIES.map(cat => {
+  const categoryRow = (cat) => {
     const monthValues = orderedMonths.map(m =>
       sumAmounts(monthTransactionsOf(m).filter(t => isExpense(t) && t.category === cat.name))
     );
-    const rowTotal = monthValues.reduce((s, v) => s + v, 0);
-    return { name: cat.name, monthValues, rowTotal };
-  });
+    return { name: cat.name, monthValues, rowTotal: monthValues.reduce((s, v) => s + v, 0) };
+  };
+  // Konto-Übertragungen stehen unterhalb des Totals und fliessen nicht in die Summen ein.
+  const categoryData = CATEGORIES.filter(c => !NON_SPENDING_CATEGORIES.has(c.name)).map(categoryRow);
+  const asideData = CATEGORIES.filter(c => NON_SPENDING_CATEGORIES.has(c.name)).map(categoryRow);
   const grandTotal = categoryData.reduce((s, c) => s + c.rowTotal, 0);
   const monthTotals = orderedMonths.map(m => getMonthTotal(m));
   const monthIncomes = orderedMonths.map(m => getMonthIncome(m));
@@ -1120,6 +1257,16 @@ function buildOverviewSheet(orderedMonths) {
   aoa.push(['EINNAHMEN', ...monthIncomes, incomeTotal, '']);
   const diffRowIdx = aoa.length;
   aoa.push(['DIFFERENZ (EINNAHMEN − AUSGABEN)', ...monthIncomes.map((v, i) => v - monthTotals[i]), incomeTotal - grandTotal, '']);
+
+  const asideRowIdx = [];
+  if (asideData.length) {
+    aoa.push([]);
+    aoa.push(['NICHT IM TOTAL']);
+    asideData.forEach(cat => {
+      asideRowIdx.push(aoa.length);
+      aoa.push([cat.name, ...cat.monthValues, cat.rowTotal, '']);
+    });
+  }
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 30 }, ...orderedMonths.map(() => ({ wch: 13 })), { wch: 16 }, { wch: 8 }];
@@ -1183,16 +1330,24 @@ function buildOverviewSheet(orderedMonths) {
     incomeTotal - grandTotal, CHF_FMT
   );
 
+  asideData.forEach((cat, i) => {
+    const r = asideRowIdx[i];
+    const excelRow = r + 1;
+    cat.monthValues.forEach((value, ci) => {
+      setComputedCell(ws, r, 1 + ci, expenseSumFormula(orderedMonths[ci], cat.name), value, CHF_FMT);
+    });
+    setComputedCell(
+      ws, r, totalColIdx,
+      `SUM(${firstMonthColLetter}${excelRow}:${lastMonthColLetter}${excelRow})`,
+      cat.rowTotal, CHF_FMT
+    );
+  });
+
   return ws;
 }
 
-function exportYearlyExcel() {
+function buildWorkbook() {
   const orderedMonths = getFullYearMonthRange();
-  if (!orderedMonths.length) {
-    showToast('Keine Daten zum Exportieren vorhanden.');
-    return;
-  }
-
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, buildOverviewSheet(orderedMonths), 'Jahresübersicht');
   orderedMonths.forEach(m => {
@@ -1204,8 +1359,25 @@ function exportYearlyExcel() {
   wb.Workbook = wb.Workbook || {};
   wb.Workbook.Sheets = wb.Workbook.Sheets || [];
   wb.Workbook.Sheets[rawDataIdx] = { Hidden: 1 };
+  return wb;
+}
 
-  XLSX.writeFile(wb, `Budget-Export-${localIsoDate(new Date())}.xlsx`);
+async function exportYearlyExcel() {
+  if (!getFullYearMonthRange().length) {
+    showToast('Keine Daten zum Exportieren vorhanden.');
+    return;
+  }
+  const btn = document.getElementById('exportExcelBtn');
+  try {
+    await withBusyButton(btn, 'Wird erstellt …', async () => {
+      await ensureXlsx();
+      XLSX.writeFile(buildWorkbook(), `Budget-Export-${localIsoDate(new Date())}.xlsx`);
+    });
+    showToast('Excel-Datei heruntergeladen.');
+  } catch (err) {
+    console.error('Export-Fehler:', err);
+    showToast('Export fehlgeschlagen. Bist du online? Die Excel-Funktion wird einmalig nachgeladen.');
+  }
 }
 
 document.getElementById('exportExcelBtn').addEventListener('click', exportYearlyExcel);
@@ -1289,7 +1461,7 @@ function openGoalsDialog() {
       <span class="goal-field-dot" style="background:${c.color}"></span>
       ${escapeHtml(c.name)}
       <input type="number" min="0" step="0.05" placeholder="kein Ziel"
-             data-goal-category="${escapeHtml(c.name)}"
+             data-goal-category="${escapeAttr(c.name)}"
              value="${goals.categories[c.name] ?? ''}">
     </label>
   `).join('');
@@ -1322,14 +1494,18 @@ document.getElementById('transactionList').addEventListener('click', (e) => {
   render();
 });
 
-document.getElementById('clearMonthBtn').addEventListener('click', () => {
+document.getElementById('clearMonthBtn').addEventListener('click', async () => {
   const monthTx = getMonthTransactions();
   if (!monthTx.length) {
     showToast('Keine Einträge in diesem Monat.');
     return;
   }
   const label = formatMonthLabel(currentMonth);
-  if (!confirm(`${plural(monthTx.length, 'Eintrag', 'Einträge')} aus ${label} wirklich löschen? Das kann nicht rückgängig gemacht werden.`)) return;
+  const ok = await askConfirm({
+    title: `${label} löschen?`,
+    text: `${plural(monthTx.length, 'Eintrag wird', 'Einträge werden')} unwiderruflich entfernt. Gelernte Regeln und Muster bleiben erhalten.`,
+  });
+  if (!ok) return;
 
   const idsToRemove = new Set(monthTx.map(t => t.id));
   transactions = transactions.filter(t => !idsToRemove.has(t.id));
@@ -1348,8 +1524,75 @@ function showToast(message) {
   const toast = document.getElementById('toast');
   toast.textContent = message;
   toast.hidden = false;
+  // Animation neu starten, auch wenn schon eine Meldung sichtbar ist.
+  toast.style.animation = 'none';
+  void toast.offsetWidth;
+  toast.style.animation = '';
   clearTimeout(showToast._t);
   showToast._t = setTimeout(() => { toast.hidden = true; }, 4000);
+}
+
+// ---- Eigener Bestätigungs-Dialog statt der Browser-Meldung ------------------
+const confirmDialog = document.getElementById('confirmDialog');
+let confirmResolve = null;
+
+function askConfirm({ title = 'Sicher?', text = '', confirmLabel = 'Löschen', danger = true }) {
+  settleConfirm(false);   // eine noch offene Abfrage sauber beenden, statt sie zu verlieren
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmText').textContent = text;
+  const okBtn = document.getElementById('confirmOkBtn');
+  okBtn.textContent = confirmLabel;
+  okBtn.className = danger ? 'btn-danger' : 'btn-primary';
+  if (!confirmDialog.open) confirmDialog.showModal();
+  return new Promise(resolve => { confirmResolve = resolve; });
+}
+
+function settleConfirm(value) {
+  if (confirmResolve) { confirmResolve(value); confirmResolve = null; }
+}
+
+document.getElementById('confirmOkBtn').addEventListener('click', () => {
+  settleConfirm(true);
+  confirmDialog.close();
+});
+document.getElementById('confirmCancelBtn').addEventListener('click', () => {
+  settleConfirm(false);
+  confirmDialog.close();
+});
+// Fängt das Schliessen per Escape-Taste ab. Das close-Ereignis kommt verzögert; ist inzwischen
+// schon wieder eine Abfrage offen, gehört sie nicht zu diesem Ereignis.
+confirmDialog.addEventListener('close', () => {
+  if (!confirmDialog.open) settleConfirm(false);
+});
+
+// ---- Excel-Bibliothek erst laden, wenn sie gebraucht wird -------------------
+// Spart beim Start rund 900 KB und macht die App auf dem Handy spürbar schneller.
+let xlsxPromise = null;
+
+function ensureXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (xlsxPromise) return xlsxPromise;
+  xlsxPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'lib/xlsx.full.min.js';
+    script.onload = () => window.XLSX ? resolve(window.XLSX) : reject(new Error('XLSX fehlt'));
+    script.onerror = () => { xlsxPromise = null; reject(new Error('XLSX konnte nicht geladen werden')); };
+    document.head.appendChild(script);
+  });
+  return xlsxPromise;
+}
+
+// Zeigt während einer längeren Aktion einen Ladezustand auf dem Knopf.
+async function withBusyButton(button, label, task) {
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.textContent = label;
+  try {
+    return await task();
+  } finally {
+    button.disabled = false;
+    button.innerHTML = original;
+  }
 }
 
 function toIsoDate(value) {
@@ -1882,11 +2125,21 @@ function handleImportTables({ tables, skipped }) {
   importDialog.showModal();
 }
 
-fileInput.addEventListener('change', () => {
+fileInput.addEventListener('change', async () => {
   const file = fileInput.files[0];
   if (!file) return;
   currentImportFileName = file.name;
   const isCsv = /\.csv$/i.test(file.name);
+
+  // Für Excel-Dateien und für Datums-Zahlen in CSVs wird die Tabellen-Bibliothek gebraucht.
+  try {
+    await ensureXlsx();
+  } catch {
+    showToast('Die Excel-Funktion konnte nicht geladen werden. Bitte einmal online öffnen.');
+    fileInput.value = '';
+    return;
+  }
+
   const reader = new FileReader();
 
   reader.onerror = () => showToast('Datei konnte nicht gelesen werden.');
@@ -1990,13 +2243,13 @@ function openReviewDialog(ids) {
     const t = transactions.find(x => x.id === id);
     if (!t) return;
     const row = document.createElement('div');
-    row.className = 'review-row';
+    row.className = 'review-row' + (isUrgent(t) ? ' is-urgent' : '');
     row.innerHTML = `
       <div class="tx-info">
         <span class="tx-desc">${escapeHtml(t.description)}</span>
         <span class="tx-meta">${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)}${isIncome(t) ? ' (Gutschrift)' : ''} · ${escapeHtml(reviewReasonText(t))}</span>
       </div>
-      <select class="tx-category-select" data-id="${t.id}">${buildCategoryOptions(t.category, t.type)}</select>
+      <select class="tx-category-select" data-id="${escapeAttr(t.id)}" aria-label="Kategorie für ${escapeAttr(t.description)}">${buildCategoryOptions(t.category, t.type)}</select>
     `;
     list.appendChild(row);
   });
@@ -2244,7 +2497,7 @@ function renderTeachRulesList() {
     <span class="teach-rule-chip">
       <span class="teach-rule-dot" style="background:${categoryColor(rule.category)}"></span>
       <span class="teach-rule-kw">${escapeHtml(rule.label || kw)}</span> → <span class="teach-rule-cat">${escapeHtml(rule.category)}</span>
-      <button type="button" class="teach-rule-remove" data-keyword="${escapeHtml(kw)}" aria-label="Regel für ${escapeHtml(kw)} löschen">✕</button>
+      <button type="button" class="teach-rule-remove" data-keyword="${escapeAttr(kw)}" aria-label="Regel für ${escapeAttr(kw)} löschen">✕</button>
     </span>
   `).join('') : '<p class="empty-state">Noch keine eigenen Regeln gelernt.</p>';
 }
@@ -2274,7 +2527,7 @@ function renderPatternsList() {
         <span class="teach-rule-dot" style="background:${categoryColor(p.category)}"></span>
         <span class="teach-rule-kw">${escapeHtml(p.label || key)}</span> → <span class="teach-rule-cat">${escapeHtml(p.category)}</span>
         <span class="teach-rule-count">(${status})</span>
-        <button type="button" class="teach-rule-remove" data-pattern-key="${escapeHtml(key)}" aria-label="Muster ${escapeHtml(p.label || key)} vergessen">✕</button>
+        <button type="button" class="teach-rule-remove" data-pattern-key="${escapeAttr(key)}" aria-label="Muster ${escapeAttr(p.label || key)} vergessen">✕</button>
       </span>
     `;
   }).join('') : '<p class="empty-state">Noch keine Muster gelernt — sie entstehen beim Zuordnen in den Karten oder Listen.</p>';
@@ -2366,6 +2619,23 @@ function formatDaysAgo(ts) {
   if (d <= 0) return 'heute';
   if (d === 1) return 'gestern';
   return `vor ${d} Tagen`;
+}
+
+// Dauerhaft sichtbarer Hinweis im Reiter „Assistent“, wie alt das letzte Backup ist.
+function renderBackupStatus() {
+  const el = document.getElementById('backupStatus');
+  const ts = getLastBackupTime();
+  if (!ts) {
+    el.textContent = transactions.length
+      ? 'Noch nie ein Backup gespeichert.'
+      : 'Noch keine Daten vorhanden.';
+    el.className = 'backup-status' + (transactions.length ? ' status-critical' : '');
+    return;
+  }
+  const d = daysSince(ts);
+  const level = d > 45 ? 'critical' : d > 20 ? 'warning' : 'good';
+  el.textContent = `Letztes Backup: ${formatDaysAgo(ts)}.`;
+  el.className = `backup-status status-${level}`;
 }
 
 function buildReminderChecklist(previousMonth) {
@@ -2461,7 +2731,7 @@ function exportBackup() {
 
 function importBackup(file) {
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     let data;
     try {
       data = JSON.parse(e.target.result);
@@ -2473,7 +2743,12 @@ function importBackup(file) {
       showToast('Das ist keine gültige Backup-Datei.');
       return;
     }
-    if (!confirm('Aktuelle Daten in diesem Browser werden durch das Backup ersetzt. Fortfahren?')) return;
+    const ok = await askConfirm({
+      title: 'Backup einspielen?',
+      text: `Alle Daten in diesem Browser werden durch das Backup vom ${formatDate(data.exportedAt) || 'unbekannten Datum'} ersetzt (${plural(data.transactions.length, 'Eintrag', 'Einträge')}).`,
+      confirmLabel: 'Ersetzen',
+    });
+    if (!ok) return;
 
     transactions = migrateTransactions(data.transactions);
     goals = data.goals && typeof data.goals === 'object' ? data.goals : { overall: null, categories: {} };
@@ -2515,9 +2790,20 @@ backupFileInput.addEventListener('change', () => {
   backupFileInput.value = '';
 });
 
+// Neue Version im Hintergrund: einmalig Bescheid geben statt still zu bleiben.
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      reg.addEventListener('updatefound', () => {
+        const fresh = reg.installing;
+        if (!fresh) return;
+        fresh.addEventListener('statechange', () => {
+          if (fresh.state === 'installed' && navigator.serviceWorker.controller) {
+            showToast('Neue Version verfügbar — App neu laden.');
+          }
+        });
+      });
+    }).catch(() => {});
   });
 }
 
@@ -2534,7 +2820,10 @@ function loadActiveTab() {
   }
 }
 
-function setActiveTab(panelId) {
+function setActiveTab(panelId, options = {}) {
+  const panel = document.getElementById(panelId);
+  const changed = panel && panel.hidden;
+
   tabButtons.forEach(btn => {
     const isActive = btn.dataset.panel === panelId;
     document.getElementById(btn.dataset.panel).hidden = !isActive;
@@ -2542,6 +2831,16 @@ function setActiveTab(panelId) {
     btn.tabIndex = isActive ? 0 : -1;
   });
   try { localStorage.setItem(TAB_STORAGE_KEY, panelId); } catch {}
+
+  // Der Inhalt fährt beim Wechsel sanft ein; die Klasse entfernt sich danach selbst.
+  if (panel && changed && options.animate !== false) {
+    panel.classList.remove('is-entering');
+    void panel.offsetWidth;
+    panel.classList.add('is-entering');
+    clearTimeout(setActiveTab._t);
+    setActiveTab._t = setTimeout(() => panel.classList.remove('is-entering'), 900);
+    if (options.scroll !== false) window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
 }
 
 document.getElementById('tabBar').addEventListener('click', (e) => {
@@ -2564,7 +2863,50 @@ document.getElementById('tabBar').addEventListener('keydown', (e) => {
   next.focus();
 });
 
-setActiveTab(loadActiveTab());
+// Die Reiterleiste klebt am Laptop direkt unter der Kopfzeile – deren Höhe messen wir live.
+const topbarEl = document.querySelector('.app-topbar');
+
+function syncTopbarHeight() {
+  document.documentElement.style.setProperty('--topbar-h', `${Math.round(topbarEl.offsetHeight)}px`);
+}
+
+if (typeof ResizeObserver === 'function') {
+  new ResizeObserver(syncTopbarHeight).observe(topbarEl);
+} else {
+  window.addEventListener('resize', syncTopbarHeight);
+}
+syncTopbarHeight();
+
+document.getElementById('welcomeImportBtn').addEventListener('click', () => {
+  setActiveTab('panel-transactions');
+  document.getElementById('fileInput').click();
+});
+
+const startTab = loadActiveTab();
+setActiveTab(startTab, { animate: false });
 
 render();
+
+// Auch der zuerst sichtbare Reiter fährt einmal sanft ein.
+const startPanel = document.getElementById(startTab);
+startPanel.classList.add('is-entering');
+setTimeout(() => startPanel.classList.remove('is-entering'), 1000);
+
+// Startbildschirm erst ausblenden, wenn der erste Inhalt wirklich gezeichnet ist.
+function hideSplash() {
+  const splash = document.getElementById('splash');
+  if (!splash || splash.classList.contains('is-hidden')) return;
+  splash.classList.add('is-hidden');
+  setTimeout(() => splash.remove(), 600);
+}
+
+if (document.fonts && document.fonts.ready) {
+  // Kurzer Mindestmoment, damit das Logo nicht aufblitzt und sofort verschwindet.
+  Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 1200))])
+    .then(() => setTimeout(hideSplash, 260));
+} else {
+  setTimeout(hideSplash, 500);
+}
+window.addEventListener('load', () => setTimeout(hideSplash, 1500));
+
 maybeShowMonthlyReminder();
