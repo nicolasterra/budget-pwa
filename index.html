@@ -197,9 +197,14 @@
     <div id="teachChatLog" class="teach-chat-log" aria-live="polite"></div>
 
     <form id="teachForm" class="teach-form">
+      <button type="button" id="teachAttachBtn" class="btn-icon" aria-label="Dokument anhängen und Zuordnungen lernen">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M13.5 7.5l-5 5a2.1 2.1 0 0 0 3 3l5-5a4.2 4.2 0 0 0-6-6l-5 5a6.3 6.3 0 0 0 9 9l4-4"/></svg>
+      </button>
       <input type="text" id="teachInput" placeholder="z. B. Aldi ist Verpflegung" autocomplete="off" required>
       <button type="submit" class="btn-primary">Senden</button>
     </form>
+    <input type="file" id="teachFileInput" accept=".csv,.xlsx,.xls,.txt" hidden>
+    <p class="teach-attach-hint">Du kannst auch eine Datei anhängen — ein altes Budget-Excel, eine Liste „Händler; Kategorie“ oder einen bereits zugeordneten Kontoauszug. Der Assistent liest nur die Zuordnungen heraus, die Buchungen selbst werden nicht importiert.</p>
 
     <div class="teach-rules">
       <div class="teach-rules-header">Feste Regeln (<span id="teachRuleCount">0</span>)</div>
@@ -386,6 +391,38 @@
       </button>
     </div>
     <button type="button" id="reminderCloseBtn" class="btn-link reminder-close">Nicht jetzt</button>
+  </div>
+</dialog>
+
+<dialog id="teachDocDialog">
+  <div class="import-content">
+    <h2>Dokument an den Assistenten</h2>
+    <p class="import-hint" id="teachDocFileInfo"></p>
+
+    <label class="teach-doc-field">
+      Anweisung zu diesem Dokument <span class="teach-doc-optional">(optional)</span>
+      <input type="text" id="teachDocInstruction" autocomplete="off" placeholder="z. B. alles ist Ferien">
+    </label>
+    <p class="teach-doc-examples">Verstanden werden diese Formen, mehrere mit Strichpunkt getrennt:<br>
+      „alles ist <em>Ferien</em>“ · „Spalte <em>3</em> ist die Kategorie“ · „Spalte <em>Händler</em> ist die Beschreibung“ · „ignoriere Zeilen mit <em>Storno</em>“ · „<em>Aldi</em> ist <em>Verpflegung</em>“</p>
+    <p id="teachDocFeedback" class="teach-doc-feedback" hidden></p>
+
+    <div class="import-mapping" id="teachDocMapping">
+      <label>Spalte mit Händler / Text
+        <select id="teachDocKeyCol"></select>
+      </label>
+      <label>Spalte mit Kategorie
+        <select id="teachDocCatCol"></select>
+      </label>
+    </div>
+
+    <p id="teachDocSummary" class="import-summary"></p>
+    <div class="teach-doc-list" id="teachDocList"></div>
+
+    <div class="dialog-actions">
+      <button type="button" id="teachDocCancelBtn" class="btn-secondary">Abbrechen</button>
+      <button type="button" id="teachDocConfirmBtn" class="btn-primary">Lernen</button>
+    </div>
   </div>
 </dialog>
 

@@ -2567,6 +2567,467 @@ document.getElementById('teachRulesList').addEventListener('click', (e) => {
   appendChatMessage('bot', `Regel für „${btn.dataset.keyword}“ gelöscht.`);
 });
 
+// ============================================================================
+// Dokument an den Assistenten: Zuordnungen aus einer Datei lernen
+// ----------------------------------------------------------------------------
+// Der Assistent versteht keinen Fliesstext. Er liest Tabellen aus und nimmt
+// zusätzlich eine feste Auswahl an Anweisungen entgegen, die pro Dokument gelten.
+// ============================================================================
+
+const TEACH_DOC_MAX_ROWS = 20000;
+const TEACH_DOC_MAX_ENTRIES = 400;
+
+const teachDocDialog = document.getElementById('teachDocDialog');
+const teachDocKeyCol = document.getElementById('teachDocKeyCol');
+const teachDocCatCol = document.getElementById('teachDocCatCol');
+const teachDocInstruction = document.getElementById('teachDocInstruction');
+
+// Zustand des gerade geöffneten Dokuments.
+let teachDoc = null;
+
+function resolveColumnRef(ref, headers) {
+  const s = String(ref || '').trim().toLowerCase().replace(/^["'„“]|["'„“]$/g, '');
+  if (!s) return -1;
+  const num = s.match(/^(\d+)$/);
+  if (num) {
+    const i = Number(num[1]) - 1;
+    return (i >= 0 && i < headers.length) ? i : -1;
+  }
+  const exact = headers.findIndex(h => String(h || '').trim().toLowerCase() === s);
+  if (exact !== -1) return exact;
+  return headers.findIndex(h => String(h || '').trim().toLowerCase().includes(s));
+}
+
+function matchCategoryPhrase(text) {
+  const direct = CATEGORIES.find(c => categoryNameVariants(c.name).includes(String(text || '').trim().toLowerCase()));
+  if (direct) return direct.name;
+  return mapFileCategory(text);
+}
+
+// Liefert { forceCategory, keyIdx, categoryIdx, ignore[], extraRules[], notes[], errors[] }
+function parseDocInstruction(raw, headers) {
+  const result = { forceCategory: null, keyIdx: -1, categoryIdx: -1, ignore: [], extraRules: [], notes: [], errors: [] };
+  const parts = String(raw || '').split(/[;\n]+/).map(s => s.trim()).filter(Boolean);
+
+  parts.forEach(part => {
+    let m;
+
+    m = part.match(/^(?:alles|alle zeilen|alle einträge|alle eintraege|jede zeile)\s+(?:ist|sind|gehört zu|gehoert zu|gehören zu|gehoeren zu)\s+(.+)$/i);
+    if (m) {
+      const cat = matchCategoryPhrase(m[1]);
+      if (cat) { result.forceCategory = cat; result.notes.push(`Alle Zeilen werden ${cat} zugeordnet.`); }
+      else result.errors.push(`Kategorie „${m[1].trim()}“ kenne ich nicht.`);
+      return;
+    }
+
+    m = part.match(/^spalte\s+(.+?)\s+ist\s+(?:die\s+)?kategorie$/i)
+     || part.match(/^(?:die\s+)?kategorie\s+(?:ist|steht in)\s+(?:in\s+)?spalte\s+(.+)$/i);
+    if (m) {
+      const idx = resolveColumnRef(m[1], headers);
+      if (idx !== -1) { result.categoryIdx = idx; result.notes.push(`Kategorie aus Spalte „${headers[idx] || idx + 1}“.`); }
+      else result.errors.push(`Spalte „${m[1].trim()}“ finde ich nicht.`);
+      return;
+    }
+
+    m = part.match(/^spalte\s+(.+?)\s+ist\s+(?:der\s+|die\s+|das\s+)?(?:händler|haendler|beschreibung|text|name|bezeichnung)$/i)
+     || part.match(/^(?:der\s+)?(?:händler|haendler|beschreibung|text|name|bezeichnung)\s+(?:ist|steht in)\s+(?:in\s+)?spalte\s+(.+)$/i);
+    if (m) {
+      const idx = resolveColumnRef(m[1], headers);
+      if (idx !== -1) { result.keyIdx = idx; result.notes.push(`Text aus Spalte „${headers[idx] || idx + 1}“.`); }
+      else result.errors.push(`Spalte „${m[1].trim()}“ finde ich nicht.`);
+      return;
+    }
+
+    m = part.match(/^ignoriere\s+(?:zeilen\s+mit\s+|alle\s+mit\s+)?(.+)$/i);
+    if (m) {
+      const word = m[1].trim().replace(/^["'„“]|["'“”]$/g, '').toLowerCase();
+      if (word) { result.ignore.push(word); result.notes.push(`Zeilen mit „${word}“ werden übersprungen.`); }
+      return;
+    }
+
+    // Sonst als normalen Lehrsatz versuchen: „Aldi ist Verpflegung“.
+    const parsed = parseTeachInput(part);
+    if (parsed.type === 'learn') {
+      result.extraRules.push({ keyword: parsed.keyword, label: parsed.label, category: parsed.category });
+      result.notes.push(`Zusätzliche Regel: „${parsed.label}“ → ${parsed.category}.`);
+    } else {
+      result.errors.push(`„${part}“ habe ich nicht verstanden.`);
+    }
+  });
+
+  return result;
+}
+
+// Findet in einer Tabelle die Spalte mit Kategorien und die mit dem Händler/Text.
+function detectDocColumns(rows) {
+  const limit = Math.min(rows.length, 25);
+
+  // 1. Mit Kopfzeile
+  for (let i = 0; i < limit; i++) {
+    const headers = (rows[i] || []).map(c => String(c ?? '').trim());
+    if (headers.filter(Boolean).length < 2) continue;
+    const cols = analyzeHeaderRow(headers);
+    if (cols.categoryIdx === -1) continue;
+    let keyIdx = cols.descIdx;
+    if (keyIdx === -1) keyIdx = headers.findIndex((h, idx) => idx !== cols.categoryIdx && h);
+    if (keyIdx === -1) continue;
+    return { headerRowIndex: i, headers, keyIdx, categoryIdx: cols.categoryIdx, hasHeader: true };
+  }
+
+  // 2. Kopfzeile ohne Kategoriespalte, z. B. „Beschreibung | Betrag“. Die Kategorie kommt
+  // dann per Anweisung („alles ist Ferien“) – die Kopfzeile darf trotzdem nicht als Daten zählen.
+  for (let i = 0; i < limit; i++) {
+    const headers = (rows[i] || []).map(c => String(c ?? '').trim());
+    if (!headers.some(Boolean)) continue;
+    const cols = analyzeHeaderRow(headers);
+    if (cols.descIdx === -1 && cols.dateIdx === -1 && cols.amountIdx === -1 && cols.creditIdx === -1) continue;
+    let keyIdx = cols.descIdx;
+    if (keyIdx === -1) {
+      keyIdx = headers.findIndex((h, idx) => h && idx !== cols.dateIdx && idx !== cols.amountIdx && idx !== cols.creditIdx);
+    }
+    if (keyIdx === -1) continue;
+    return { headerRowIndex: i, headers, keyIdx, categoryIdx: -1, hasHeader: true };
+  }
+
+  // 3. Ohne Kopfzeile: die Spalte, in der überwiegend bekannte Kategorienamen stehen.
+  const width = rows.reduce((w, r) => Math.max(w, (r || []).length), 0);
+  const sample = rows.slice(0, 200);
+  let best = null;
+  for (let c = 0; c < width; c++) {
+    let filled = 0, hits = 0;
+    sample.forEach(r => {
+      const v = String((r || [])[c] ?? '').trim();
+      if (!v) return;
+      filled++;
+      if (mapFileCategory(v)) hits++;
+    });
+    if (filled >= 2 && hits / filled >= 0.6 && (!best || hits > best.hits)) best = { c, hits, filled };
+  }
+  if (best) {
+    const width2 = width;
+    let keyIdx = -1;
+    for (let c = 0; c < width2; c++) {
+      if (c === best.c) continue;
+      const filled = sample.filter(r => String((r || [])[c] ?? '').trim()).length;
+      if (filled >= 2) { keyIdx = c; break; }
+    }
+    if (keyIdx !== -1) {
+      const headers = Array.from({ length: width2 }, (_, i) => `Spalte ${i + 1}`);
+      return { headerRowIndex: -1, headers, keyIdx, categoryIdx: best.c, hasHeader: false };
+    }
+  }
+  return null;
+}
+
+// Baut aus den Zeilen die Liste der zu lernenden Zuordnungen.
+function buildDocEntries() {
+  if (!teachDoc) return [];
+  const { rows, headerRowIndex } = teachDoc;
+  const instruction = teachDoc.instruction;
+  const keyIdx = Number(teachDocKeyCol.value);
+  const catIdx = Number(teachDocCatCol.value);
+
+  const dataRows = rows.slice(headerRowIndex + 1, headerRowIndex + 1 + TEACH_DOC_MAX_ROWS);
+  const byKey = new Map();
+  let skippedIgnored = 0, skippedUnknown = 0;
+  const unknownNames = new Set();
+
+  dataRows.forEach(row => {
+    const rawKey = String((row || [])[keyIdx] ?? '').trim();
+    if (!rawKey) return;
+
+    const lower = rawKey.toLowerCase();
+    if (instruction.ignore.some(w => lower.includes(w))) { skippedIgnored++; return; }
+
+    let category = instruction.forceCategory;
+    if (!category) {
+      const rawCat = catIdx === -1 ? '' : String((row || [])[catIdx] ?? '').trim();
+      if (!rawCat) return;
+      category = mapFileCategory(rawCat);
+      if (!category) { skippedUnknown++; unknownNames.add(rawCat); return; }
+    }
+    if (category === FALLBACK_CATEGORY) return;
+
+    // Ganze Buchungstexte werden auf den Händlerkern eingedampft, kurze Listeneinträge
+    // bleiben, wie sie sind – daraus wird eine feste Regel.
+    const norm = normalizeDescription(rawKey);
+    const isShort = rawKey.split(/\s+/).length <= MAX_KEYWORD_WORDS && rawKey.length <= 40;
+    const key = isShort ? (norm || lower) : norm;
+    if (!key || key.length < MIN_KEYWORD_LEN) return;
+    if (isShort && TEACH_STOPWORDS.includes(key)) return;
+
+    const target = isShort ? 'rule' : 'pattern';
+    const id = `${target}:${key}`;
+    if (!byKey.has(id)) byKey.set(id, { key, label: key, target, counts: new Map() });
+    const entry = byKey.get(id);
+    entry.counts.set(category, (entry.counts.get(category) || 0) + 1);
+  });
+
+  const entries = [];
+  const conflicts = [];
+  byKey.forEach(entry => {
+    const sorted = [...entry.counts.entries()].sort((a, b) => b[1] - a[1]);
+    const total = sorted.reduce((s, [, n]) => s + n, 0);
+    const [category, count] = sorted[0];
+    // Bei uneinheitlicher Zuordnung lieber nachfragen als raten.
+    if (sorted.length > 1 && count / total < 0.6) {
+      conflicts.push({ ...entry, options: sorted });
+      return;
+    }
+    entries.push({ key: entry.key, label: entry.label, target: entry.target, category, count, total });
+  });
+
+  entries.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+  // Ausdrücklich genannte Regeln stehen zuoberst.
+  instruction.extraRules.forEach(r => {
+    entries.unshift({ key: r.keyword, label: r.label, target: 'rule', category: r.category, count: 0, total: 0, manual: true });
+  });
+
+  teachDoc.stats = { skippedIgnored, skippedUnknown, unknownNames: [...unknownNames], conflicts };
+  return entries.slice(0, TEACH_DOC_MAX_ENTRIES);
+}
+
+function renderTeachDocPreview() {
+  if (!teachDoc) return;
+  teachDoc.instruction = parseDocInstruction(teachDocInstruction.value, teachDoc.headers);
+
+  // Anweisungen dürfen die erkannten Spalten überschreiben.
+  if (teachDoc.instruction.keyIdx !== -1) teachDocKeyCol.value = String(teachDoc.instruction.keyIdx);
+  if (teachDoc.instruction.categoryIdx !== -1) teachDocCatCol.value = String(teachDoc.instruction.categoryIdx);
+  teachDocCatCol.disabled = !!teachDoc.instruction.forceCategory;
+
+  const feedback = document.getElementById('teachDocFeedback');
+  const messages = [...teachDoc.instruction.notes, ...teachDoc.instruction.errors.map(e => '⚠ ' + e)];
+  feedback.hidden = messages.length === 0;
+  feedback.textContent = messages.join(' ');
+  feedback.classList.toggle('has-error', teachDoc.instruction.errors.length > 0);
+
+  const entries = buildDocEntries();
+  teachDoc.entries = entries;
+
+  const summary = document.getElementById('teachDocSummary');
+  const stats = teachDoc.stats;
+  const parts = [`${plural(entries.length, 'Zuordnung', 'Zuordnungen')} gefunden`];
+  if (stats.skippedIgnored) parts.push(`${stats.skippedIgnored} übersprungen`);
+  if (stats.conflicts.length) parts.push(`${plural(stats.conflicts.length, 'Fall', 'Fälle')} uneinheitlich`);
+  if (stats.unknownNames.length) parts.push(`unbekannt: ${stats.unknownNames.slice(0, 4).join(', ')}${stats.unknownNames.length > 4 ? ' …' : ''}`);
+  summary.textContent = parts.join(' · ');
+  summary.classList.toggle('import-summary-warning', entries.length === 0 || stats.unknownNames.length > 0);
+
+  const list = document.getElementById('teachDocList');
+  list.innerHTML = entries.length ? entries.map((e, i) => `
+    <label class="teach-doc-row">
+      <input type="checkbox" data-index="${i}" checked>
+      <span class="teach-rule-dot" style="background:${categoryColor(e.category)}"></span>
+      <span class="teach-doc-key">${escapeHtml(e.label)}</span>
+      <span class="teach-doc-arrow">→</span>
+      <span class="teach-doc-cat">${escapeHtml(e.category)}</span>
+      <span class="teach-doc-meta">${e.manual ? 'Anweisung' : (e.target === 'rule' ? 'feste Regel' : 'Muster')}${e.count ? ` · ${e.count}×` : ''}</span>
+    </label>
+  `).join('') : '<p class="empty-state">Nichts gefunden. Prüfe die Spalten oben oder gib eine Anweisung.</p>';
+
+  document.getElementById('teachDocConfirmBtn').disabled = entries.length === 0;
+}
+
+function applyTeachDocument() {
+  const list = document.getElementById('teachDocList');
+  const chosen = [];
+  list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    if (cb.checked) chosen.push(teachDoc.entries[Number(cb.dataset.index)]);
+  });
+
+  let rules = 0, patternsLearned = 0;
+  chosen.forEach(e => {
+    if (e.target === 'rule') {
+      teachRule(e.key, e.category, e.label);
+      rules++;
+    } else {
+      // Zuordnungen aus deinen Dateien gelten als bestätigt und greifen sofort.
+      patterns[`d:${e.key}`] = {
+        category: e.category,
+        streak: Math.max(e.count, PATTERN_AUTO_THRESHOLD),
+        autoCount: PATTERN_PROBATION_COUNT,
+        label: e.key,
+        updatedAt: Date.now(),
+      };
+      patternsLearned++;
+    }
+  });
+
+  saveLearnedRules();
+  savePatterns();
+  const updated = reapplyToUncertain();
+
+  saveTransactions();
+  render();
+  renderTeachRulesList();
+  renderPatternsList();
+
+  const bits = [];
+  if (rules) bits.push(plural(rules, 'feste Regel', 'feste Regeln'));
+  if (patternsLearned) bits.push(plural(patternsLearned, 'Muster', 'Muster'));
+  let answer = bits.length
+    ? `Gelernt: ${bits.join(' und ')} aus „${teachDoc.fileName}“.`
+    : `Aus „${teachDoc.fileName}“ habe ich nichts übernommen.`;
+  if (updated) answer += ` ${plural(updated, 'offener Eintrag wurde', 'offene Einträge wurden')} dadurch automatisch zugeordnet.`;
+  appendChatMessage('bot', answer);
+}
+
+// Nach neuem Wissen alle offenen Einträge noch einmal bewerten.
+function reapplyToUncertain() {
+  let count = 0;
+  transactions.forEach(t => {
+    if (!t.uncertain) return;
+    const guess = guessCategory(t.description, t.amount, t.type);
+    if (guess.certain) {
+      t.category = guess.category;
+      t.uncertain = false;
+      t.reason = guess.reason;
+      count++;
+    }
+  });
+  return count;
+}
+
+function fillDocColumnSelect(select, headers, selected, withNone) {
+  select.innerHTML = '';
+  if (withNone) {
+    const none = document.createElement('option');
+    none.value = '-1';
+    none.textContent = '– keine –';
+    select.appendChild(none);
+  }
+  headers.forEach((h, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = h || `Spalte ${i + 1}`;
+    select.appendChild(opt);
+  });
+  select.value = String(selected);
+}
+
+function openTeachDocument(fileName, rows) {
+  const cleanRows = rows.filter(r => (r || []).some(c => String(c ?? '').trim()));
+  if (!cleanRows.length) {
+    appendChatMessage('bot', 'Die Datei enthält keine Daten.');
+    return;
+  }
+
+  const detected = detectDocColumns(cleanRows);
+  const width = cleanRows.reduce((w, r) => Math.max(w, (r || []).length), 0);
+  const headers = detected && detected.hasHeader
+    ? detected.headers
+    : Array.from({ length: width }, (_, i) => `Spalte ${i + 1}`);
+
+  teachDoc = {
+    fileName,
+    rows: cleanRows,
+    headers,
+    headerRowIndex: detected && detected.hasHeader ? detected.headerRowIndex : -1,
+    instruction: { forceCategory: null, keyIdx: -1, categoryIdx: -1, ignore: [], extraRules: [], notes: [], errors: [] },
+    entries: [],
+    stats: { skippedIgnored: 0, skippedUnknown: 0, unknownNames: [], conflicts: [] },
+  };
+
+  fillDocColumnSelect(teachDocKeyCol, headers, detected ? detected.keyIdx : 0, false);
+  fillDocColumnSelect(teachDocCatCol, headers, detected ? detected.categoryIdx : -1, true);
+
+  document.getElementById('teachDocFileInfo').textContent =
+    `${fileName} · ${plural(cleanRows.length, 'Zeile', 'Zeilen')}${detected ? '' : ' · Spalten bitte selbst wählen'}`;
+  teachDocInstruction.value = '';
+  renderTeachDocPreview();
+  teachDocDialog.showModal();
+}
+
+// Textdateien: jede Zeile ist ein Lehrsatz wie im Chat.
+function learnFromTextLines(fileName, text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).slice(0, 2000);
+  let learned = 0;
+  const failed = [];
+  lines.forEach(line => {
+    const parsed = parseTeachInput(line);
+    if (parsed.type === 'learn') { teachRule(parsed.keyword, parsed.category, parsed.label); learned++; }
+    else failed.push(line);
+  });
+  saveLearnedRules();
+  const updated = reapplyToUncertain();
+  saveTransactions();
+  render();
+  renderTeachRulesList();
+
+  let answer = learned
+    ? `Aus „${fileName}“ habe ich ${plural(learned, 'Regel', 'Regeln')} gelernt.`
+    : `Aus „${fileName}“ konnte ich keine Regel lesen. Jede Zeile sollte aussehen wie „Aldi ist Verpflegung“.`;
+  if (updated) answer += ` ${plural(updated, 'offener Eintrag wurde', 'offene Einträge wurden')} dadurch automatisch zugeordnet.`;
+  if (failed.length) answer += ` ${plural(failed.length, 'Zeile', 'Zeilen')} habe ich nicht verstanden.`;
+  appendChatMessage('bot', answer);
+}
+
+const teachFileInput = document.getElementById('teachFileInput');
+document.getElementById('teachAttachBtn').addEventListener('click', () => teachFileInput.click());
+
+teachFileInput.addEventListener('change', async () => {
+  const file = teachFileInput.files[0];
+  teachFileInput.value = '';
+  if (!file) return;
+
+  appendChatMessage('user', `📎 ${file.name}`);
+
+  const isText = /\.txt$/i.test(file.name);
+  const isCsv = /\.csv$/i.test(file.name);
+
+  if (!isText && !isCsv) {
+    try {
+      await ensureXlsx();
+    } catch {
+      appendChatMessage('bot', 'Die Excel-Funktion konnte nicht geladen werden. Bitte einmal online öffnen.');
+      return;
+    }
+  }
+
+  const reader = new FileReader();
+  reader.onerror = () => appendChatMessage('bot', 'Die Datei konnte nicht gelesen werden.');
+  reader.onload = (e) => {
+    try {
+      if (isText) {
+        learnFromTextLines(file.name, e.target.result);
+      } else if (isCsv) {
+        openTeachDocument(file.name, parseCsvText(e.target.result));
+      } else {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        // Alle Blätter hintereinander, damit ein Jahres-Excel in einem Zug gelesen wird.
+        const rows = [];
+        wb.SheetNames.forEach(name => {
+          const sheetRows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '' });
+          sheetRows.forEach(r => rows.push(r));
+        });
+        openTeachDocument(file.name, rows);
+      }
+    } catch (err) {
+      console.error('Dokument-Fehler:', err);
+      appendChatMessage('bot', 'Die Datei konnte ich nicht auswerten. Ist es eine gültige CSV-, Excel- oder Textdatei?');
+    }
+  };
+
+  if (isText || isCsv) reader.readAsText(file, 'UTF-8');
+  else reader.readAsArrayBuffer(file);
+});
+
+teachDocInstruction.addEventListener('input', renderTeachDocPreview);
+teachDocKeyCol.addEventListener('change', renderTeachDocPreview);
+teachDocCatCol.addEventListener('change', renderTeachDocPreview);
+
+document.getElementById('teachDocCancelBtn').addEventListener('click', () => {
+  teachDocDialog.close();
+  appendChatMessage('bot', 'Abgebrochen — ich habe nichts gelernt.');
+});
+
+document.getElementById('teachDocConfirmBtn').addEventListener('click', () => {
+  applyTeachDocument();
+  teachDocDialog.close();
+});
+
 // ---- Monatliche Erinnerung ---------------------------------------------------
 // Erscheint einmal pro Kalendermonat, beim ersten Öffnen der App im neuen Monat.
 const REMINDER_MONTH_KEY = 'budget_reminder_month';

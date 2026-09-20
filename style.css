@@ -1569,3 +1569,105 @@ table.import-preview tr:last-child td { border-bottom: none; }
   }
   .splash { transition: opacity .001ms; }
 }
+
+/* ---- Dokument an den Assistenten ---- */
+.teach-form { align-items: center; }
+.teach-attach-hint {
+  font-size: .76rem;
+  color: var(--text-muted);
+  margin: -.8rem 0 1.2rem;
+}
+
+#teachDocDialog { width: min(92vw, 560px); }
+
+/* Nur die Zuordnungsliste scrollt – „Lernen“ und „Abbrechen“ bleiben immer sichtbar. */
+#teachDocDialog .import-content {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(88vh - 3rem);
+  overflow: hidden;
+}
+#teachDocDialog .teach-doc-list {
+  flex: 1 1 auto;
+  min-height: 5rem;
+  max-height: none;
+}
+#teachDocDialog .dialog-actions { flex-shrink: 0; }
+
+.teach-doc-field {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  font-size: .8rem;
+  color: var(--text-muted);
+  margin-bottom: .4rem;
+}
+.teach-doc-field input { font-size: .92rem; }
+.teach-doc-optional { opacity: .7; }
+
+.teach-doc-examples {
+  font-size: .74rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 0 0 .7rem;
+}
+.teach-doc-examples em { font-style: normal; font-weight: 600; color: var(--text); }
+
+.teach-doc-feedback {
+  font-size: .78rem;
+  font-weight: 500;
+  color: var(--status-good);
+  background: var(--status-good-soft);
+  border-radius: var(--radius-sm);
+  padding: .5rem .65rem;
+  margin: 0 0 .8rem;
+}
+.teach-doc-feedback.has-error {
+  color: var(--status-warning);
+  background: var(--status-warning-soft);
+}
+
+.teach-doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  max-height: 34vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  padding: .5rem;
+  margin-bottom: 1.1rem;
+}
+
+#teachDocSummary { border-radius: var(--radius-sm) var(--radius-sm) 0 0; border: 1px solid var(--border); }
+
+.teach-doc-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .8rem;
+  padding: .4rem .45rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-width: 0;
+}
+.teach-doc-row:hover { background: var(--surface-sunken); }
+.teach-doc-row input[type="checkbox"] { width: 17px; height: 17px; flex-shrink: 0; accent-color: var(--accent); }
+
+.teach-doc-key {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.teach-doc-arrow { color: var(--text-muted); flex-shrink: 0; }
+.teach-doc-cat { flex-shrink: 0; }
+.teach-doc-meta { font-size: .7rem; color: var(--text-muted); flex-shrink: 0; margin-left: auto; padding-left: .4rem; }
+
+@media (max-width: 520px) {
+  .teach-doc-row { flex-wrap: wrap; row-gap: .15rem; }
+  .teach-doc-meta { margin-left: 1.55rem; width: 100%; }
+}
