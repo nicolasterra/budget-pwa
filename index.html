@@ -255,7 +255,7 @@
     <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
     <div id="categoryFilterChip" class="filter-chip" hidden>
       <span class="filter-chip-dot" id="categoryFilterDot"></span>
-      <span>Kategorie: <strong id="categoryFilterName"></strong></span>
+      <span><strong id="categoryFilterName"></strong> · <span id="categoryFilterPeriod"></span></span>
       <span class="filter-chip-count" id="categoryFilterCount"></span>
       <button type="button" id="categoryFilterClear" class="filter-chip-clear" aria-label="Filter aufheben">✕</button>
     </div>
@@ -265,8 +265,15 @@
   </section>
 
   <section class="teach-section tab-panel" id="panel-teach" role="tabpanel" aria-labelledby="tab-teach" hidden>
-    <div class="section-header"><h2>Lern-Assistent</h2></div>
-    <p class="teach-intro">Kein echter KI-Chat — ein einfacher Assistent, dem du feste Regeln beibringen kannst, z. B. „Aldi ist Verpflegung“ oder „vergiss Aldi“. Daneben lernt die App still mit: Ordnest du dieselbe Buchung fünfmal hintereinander gleich zu, übernimmt sie das künftig automatisch – die ersten Male noch mit Rückfrage in den Karten.</p>
+    <div class="section-header"><h2>Assistent</h2></div>
+    <p class="teach-intro">Kein Sprachmodell, sondern ein Befehlsassistent: Er versteht eine feste Menge an Anweisungen und <strong>führt sie in der App aus</strong> — Karteikarten mit einer bestimmten Auswahl starten, Listen filtern, Summen ausrechnen, Monat wechseln, exportieren. Dazu lernt er Regeln („Aldi ist Verpflegung“) und merkt sich still deine Muster. Schreib <strong>Hilfe</strong> für alle Befehle.</p>
+
+    <div class="teach-suggestions" id="teachSuggestions">
+      <button type="button" class="teach-suggestion">Frage mich nochmals auf alle Einnahmen ab</button>
+      <button type="button" class="teach-suggestion">Wie stehe ich diesen Monat?</button>
+      <button type="button" class="teach-suggestion">Wie viel habe ich für Verpflegung ausgegeben?</button>
+      <button type="button" class="teach-suggestion">Hilfe</button>
+    </div>
 
     <div id="teachChatLog" class="teach-chat-log" aria-live="polite"></div>
 
@@ -396,7 +403,10 @@
         <button type="button" id="reviewUndoBtn" class="review-nav-btn" aria-label="Zurück (letzte Aktion rückgängig)" disabled>
           <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5L2.5 8l3.5 3.5"/><path d="M2.5 8h9a5 5 0 0 1 0 10h-2.5"/></svg>
         </button>
-        <span id="reviewSessionProgress" class="review-session-progress"></span>
+        <span class="review-session-heading">
+          <span id="reviewSessionTitle" class="review-session-title">Zu prüfen</span>
+          <span id="reviewSessionProgress" class="review-session-progress"></span>
+        </span>
         <button type="button" id="reviewRedoBtn" class="review-nav-btn" aria-label="Vorwärts (Aktion wiederholen)" disabled>
           <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M14 4.5L17.5 8l-3.5 3.5"/><path d="M17.5 8h-9a5 5 0 0 0 0 10h2.5"/></svg>
         </button>

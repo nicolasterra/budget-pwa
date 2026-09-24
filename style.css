@@ -2030,3 +2030,53 @@ button.category-row:hover { background: var(--surface-sunken); }
 /* Die oberste Skalenbeschriftung haengt UNTER ihre Linie. Oberhalb sitzt der direkt
    beschriftete Hoechstwert - beides im selben Streifen wuerde sich ueberlappen. */
 .chart-grid-line.is-top i { top: 3px; bottom: auto; }
+
+/* ---------- 15. Befehlsassistent ---------- */
+/* Antworten koennen mehrzeilig sein (Hilfe, Ueberblick) - Umbrueche erhalten. */
+.teach-bubble-text { white-space: pre-wrap; }
+
+.teach-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  margin: -.4rem 0 1rem;
+}
+
+.teach-suggestion {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-pill);
+  padding: .45rem .75rem;
+  font-size: .78rem;
+  min-height: 36px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-fast) ease, background var(--dur-fast) ease;
+}
+
+.teach-suggestion:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.review-session-heading {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.review-session-title {
+  font-size: .74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 11rem;
+}
+
+@media (max-width: 600px) {
+  .teach-suggestion { min-height: 40px; }
+}

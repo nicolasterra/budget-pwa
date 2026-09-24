@@ -600,19 +600,45 @@ let categorySort = (() => {
 })();
 
 // Filter für den Reiter „Ausgaben“: null = alles zeigen.
+// scope 'month' folgt dem gewählten Monat, 'range' hält einen festen Zeitraum aus Analytics.
 let categoryFilter = null;
 
-function renderCategoryFilterChip(count) {
-  const wrap = document.getElementById('categoryFilterChip');
-  if (!categoryFilter) { wrap.hidden = true; return; }
-  wrap.hidden = false;
-  document.getElementById('categoryFilterName').textContent = categoryFilter;
-  document.getElementById('categoryFilterCount').textContent = plural(count, 'Eintrag', 'Einträge');
-  document.getElementById('categoryFilterDot').style.background = categoryColor(categoryFilter, TX_EXPENSE);
+function filterBounds() {
+  if (!categoryFilter) return null;
+  if (categoryFilter.scope === 'range') {
+    return { from: categoryFilter.from, to: categoryFilter.to, label: categoryFilter.label };
+  }
+  // Monatsfilter wird bei jedem Zeichnen neu abgeleitet, damit die Monatspfeile ihn mitnehmen.
+  return { from: `${currentMonth}-01`, to: `${currentMonth}-31`, label: formatMonthLabel(currentMonth) };
 }
 
-function setCategoryFilter(name) {
-  categoryFilter = name;
+function filteredTransactions() {
+  const b = filterBounds();
+  if (!b) return null;
+  return transactions
+    .filter(t => t.category === categoryFilter.name && t.date >= b.from && t.date <= b.to)
+    .sort(compareChronological);
+}
+
+function renderCategoryFilterChip(list) {
+  const wrap = document.getElementById('categoryFilterChip');
+  if (!categoryFilter || !list) { wrap.hidden = true; return; }
+  const b = filterBounds();
+  wrap.hidden = false;
+  document.getElementById('categoryFilterName').textContent = categoryFilter.name;
+  document.getElementById('categoryFilterPeriod').textContent = b.label;
+  // Summe der Kategorie im Zeitraum – sonst muesste man die Zeilen selbst zusammenrechnen.
+  document.getElementById('categoryFilterCount').textContent =
+    `${plural(list.length, 'Eintrag', 'Einträge')} · ${formatCurrency(sumAmounts(list))}`;
+  document.getElementById('categoryFilterDot').style.background =
+    categoryColor(categoryFilter.name, list.length && isIncome(list[0]) ? TX_INCOME : TX_EXPENSE);
+}
+
+// range (optional) = { from, to, label } aus Analytics; ohne ihn gilt der gewählte Monat.
+function setCategoryFilter(name, range) {
+  categoryFilter = range
+    ? { name, scope: 'range', from: range.from, to: range.to, label: range.label }
+    : { name, scope: 'month' };
   setActiveTab('panel-transactions');
   render();
 }
@@ -721,12 +747,16 @@ function render() {
   renderReviewQueue();
   renderBackupStatus();
 
-  // Reiter „Ausgaben“: optional auf eine Kategorie eingeschränkt.
-  const visibleTx = categoryFilter ? monthTx.filter(t => t.category === categoryFilter) : monthTx;
-  renderCategoryFilterChip(visibleTx.length);
+  // Reiter „Ausgaben“: optional auf eine Kategorie eingeschränkt, im Zeitraum des Filters.
+  const filtered = filteredTransactions();
+  const visibleTx = filtered || monthTx;
+  renderCategoryFilterChip(filtered);
 
   const txListEl = document.getElementById('transactionList');
   document.getElementById('emptyState').hidden = visibleTx.length > 0;
+  document.getElementById('emptyState').textContent = categoryFilter
+    ? `Keine Einträge für „${categoryFilter.name}“ in diesem Zeitraum.`
+    : 'Noch keine Einträge für diesen Monat. Füge einen Eintrag hinzu oder importiere dein Excel/CSV.';
   txListEl.innerHTML = visibleTx.map((t, i) => {
     const credit = isIncome(t);
     const classes = ['transaction-item'];
@@ -938,18 +968,24 @@ function currentReviewTx() {
   return transactions.find(t => t.id === id) || null;
 }
 
-function startReviewSession() {
-  const queue = getReviewQueue();
-  if (!queue.length) {
-    showToast('Nichts zu prüfen.');
-    return;
-  }
-  reviewSession = { ids: queue.map(t => t.id), index: 0, history: [], redoStack: [] };
+// Nimmt eine beliebige Auswahl an, nicht nur die offenen Posten – damit der Assistent
+// gezielt abfragen kann („nochmals alle Einnahmen“).
+function startReviewSessionWith(list, label) {
+  if (!list.length) return false;
+  reviewSession = { ids: list.map(t => t.id), index: 0, history: [], redoStack: [], label: label || 'Zu prüfen' };
+  document.getElementById('reviewSessionTitle').textContent = reviewSession.label;
   document.getElementById('reviewCardStack').hidden = false;
   document.getElementById('reviewSessionDone').hidden = true;
   document.getElementById('reviewChipGrid').hidden = false;
   renderReviewCard();
-  reviewSessionDialog.showModal();
+  if (!reviewSessionDialog.open) reviewSessionDialog.showModal();
+  return true;
+}
+
+function startReviewSession() {
+  if (!startReviewSessionWith(getReviewQueue(), 'Zu prüfen')) {
+    showToast('Nichts zu prüfen.');
+  }
 }
 
 function updateReviewNavButtons() {
@@ -1693,6 +1729,9 @@ function rangeBounds(buckets) {
   return { from: buckets[0].from, to: buckets[buckets.length - 1].to };
 }
 
+// Zuletzt gezeichneter Zeitraum – wird an den Kategorie-Filter weitergegeben.
+let lastRangeInfo = null;
+
 function transactionsInRange(bounds) {
   return transactions.filter(t => t.date >= bounds.from && t.date <= bounds.to);
 }
@@ -1755,6 +1794,7 @@ function renderRangeChart() {
   const elapsedValues = values.slice(0, Math.max(elapsed.length, 1));
   const average = elapsedValues.length ? elapsedValues.reduce((s, v) => s + v, 0) / elapsedValues.length : 0;
 
+  lastRangeInfo = { from: bounds.from, to: bounds.to, label: rangePeriodLabel(buckets) };
   document.getElementById('chartPeriodLabel').textContent = rangePeriodLabel(buckets);
   document.getElementById('chartTotal').textContent = formatCurrency(total);
   document.getElementById('chartSub').textContent = income > 0
@@ -1892,10 +1932,12 @@ document.getElementById('chartBody').addEventListener('click', (e) => {
   }
 });
 
+// Aus Analytics wird der gerade angezeigte Zeitraum mitgegeben, damit die Liste
+// dieselbe Summe zeigt wie der angeklickte Balken-Zeitraum.
 document.getElementById('rangeCategoryList').addEventListener('click', (e) => {
   const row = e.target.closest('.category-row');
   if (!row || !row.dataset.category) return;
-  setCategoryFilter(row.dataset.category);
+  setCategoryFilter(row.dataset.category, lastRangeInfo);
 });
 
 const chartTableToggle = document.getElementById('chartTableToggle');
@@ -3075,13 +3117,283 @@ function applyRuleRetroactively(keyword, category) {
   return count;
 }
 
+
+// ============================================================================
+// Befehle für den Assistenten
+// ----------------------------------------------------------------------------
+// Der Assistent ist kein Sprachmodell. Er erkennt eine feste, aber bewusst breit
+// formulierte Menge an Befehlen und führt sie in der App aus: abfragen, anzeigen,
+// rechnen, springen, exportieren. Was er nicht versteht, sagt er – mit Beispielen,
+// statt zu raten.
+// ============================================================================
+
+// ---- Auswahl von Buchungen --------------------------------------------------
+// Erkennt Typ (Einnahme/Ausgabe/offen), Kategorie und Monat in beliebiger Reihenfolge.
+const MONTH_WORDS = {
+  januar: 1, jänner: 1, februar: 2, märz: 3, maerz: 3, april: 4, mai: 5, juni: 6,
+  juli: 7, august: 8, september: 9, oktober: 10, november: 11, dezember: 12,
+};
+
+function detectMonthInText(text) {
+  const s = text.toLowerCase();
+  if (/\b(diesen|aktuellen|laufenden)\s+monat\b/.test(s) || /\bdiesem monat\b/.test(s)) return currentMonth;
+  if (/\b(letzten|vorherigen|vergangenen)\s+monat\b/.test(s) || /\bvormonat\b/.test(s)) return shiftMonth(currentMonth, -1);
+
+  const yearMatch = s.match(/\b(20\d{2})\b/);
+  for (const [word, num] of Object.entries(MONTH_WORDS)) {
+    if (new RegExp(`\\b${word}\\b`).test(s)) {
+      const year = yearMatch ? yearMatch[1] : currentMonth.slice(0, 4);
+      return `${year}-${String(num).padStart(2, '0')}`;
+    }
+  }
+  const iso = s.match(/\b(20\d{2})-(0[1-9]|1[0-2])\b/);
+  if (iso) return `${iso[1]}-${iso[2]}`;
+  return null;
+}
+
+function detectYearInText(text) {
+  if (!/\b(jahr|jährlich|jaehrlich|gesamtes jahr|ganzes jahr)\b/i.test(text)) return null;
+  const y = text.match(/\b(20\d{2})\b/);
+  return y ? y[1] : currentMonth.slice(0, 4);
+}
+
+// Wortformen mit Stamm, damit „offenen“, „aller“ oder „eingenommen“ auch greifen.
+const WORDS_INCOME = /\b(einnahm\w*|gutschrift\w*|eingenommen|eingang|eingänge|eingaenge)\b/g;
+const WORDS_EXPENSE = /\b(ausgab\w*|ausgegeben|belastung\w*|bezahlt)\b/g;
+const WORDS_OPEN = /\b(offen\w*|unsicher\w*|ungeklärt\w*|ungeklaert\w*|unklar\w*)\b|\bzu prüfen\b|\bzu pruefen\b/g;
+const WORDS_ALL = /\b(alle\w*|alles|gesamt\w*|komplett|immer|jemals|sämtlich\w*|saemtlich\w*)\b/g;
+
+// Strukturwörter vor der Kategoriesuche entfernen. Sonst gewinnt „einnahmen“ als Alias
+// der Kategorie „Lohn“ gegen seine eigentliche Bedeutung (Buchungstyp).
+function residualForCategory(text) {
+  let s = ' ' + text.toLowerCase() + ' ';
+  [WORDS_INCOME, WORDS_EXPENSE, WORDS_OPEN, WORDS_ALL].forEach(re => { s = s.replace(re, ' '); });
+  Object.keys(MONTH_WORDS).forEach(w => { s = s.replace(new RegExp(`\\b${w}\\b`, 'g'), ' '); });
+  return s.replace(/\b(monat|monate|monaten|jahr|jahre|jahres|diesen|diesem|letzten|vorherigen)\b/g, ' ');
+}
+
+// Findet eine Kategorie aus BEIDEN Listen im Text.
+function detectCategoryInText(text) {
+  const lower = text.toLowerCase();
+  let best = null;
+  [...CATEGORIES, ...INCOME_CATEGORIES].forEach(cat => {
+    categoryNameVariants(cat.name).forEach(needle => {
+      if (needle.length < 3) return;
+      if (findWholeWordIndices(lower, needle).length && (!best || needle.length > best.len)) {
+        best = { name: cat.name, len: needle.length };
+      }
+    });
+  });
+  if (best) return best.name;
+  // Umgangssprachliche Namen aus der Datei-Zuordnung mitnehmen („Lebensmittel“).
+  for (const [name, aliases] of Object.entries(CATEGORY_ALIASES)) {
+    for (const a of aliases) {
+      if (a.length >= 4 && findWholeWordIndices(lower, a).length) return name;
+    }
+  }
+  return null;
+}
+
+// Liefert { list, label } – die Auswahl und ihre Beschreibung im Klartext.
+function selectTransactions(text) {
+  const s = text.toLowerCase();
+  const parts = [];
+  let list = transactions.slice();
+
+  // Reguläre Ausdrücke mit /g behalten ihren Zustand – vor jedem Test zurücksetzen.
+  const test = (re) => { re.lastIndex = 0; return re.test(s); };
+  const onlyOpen = test(WORDS_OPEN);
+  const wantIncome = test(WORDS_INCOME);
+  const wantExpense = test(WORDS_EXPENSE);
+  const wantsAll = test(WORDS_ALL);
+
+  if (wantIncome && !wantExpense) { list = list.filter(isIncome); parts.push('Einnahmen'); }
+  else if (wantExpense && !wantIncome) { list = list.filter(isExpense); parts.push('Ausgaben'); }
+  else parts.push('Buchungen');
+
+  if (onlyOpen) { list = list.filter(t => t.uncertain); parts.push('offen'); }
+
+  const category = detectCategoryInText(residualForCategory(text));
+  if (category) { list = list.filter(t => t.category === category); parts.push(category); }
+
+  const year = detectYearInText(text);
+  const month = detectMonthInText(text);
+  if (year) {
+    list = list.filter(t => t.date.slice(0, 4) === year);
+    parts.push(year);
+  } else if (month) {
+    list = list.filter(t => t.date.slice(0, 7) === month);
+    parts.push(formatMonthLabel(month));
+  } else if (wantsAll) {
+    // „alle Einnahmen“ heisst alle, nicht nur die des gewählten Monats.
+    parts.push('alle Monate');
+  } else {
+    // Ohne Zeitangabe: der gewählte Monat, sonst würde man aus Versehen Jahre abfragen.
+    list = list.filter(t => t.date.slice(0, 7) === currentMonth);
+    parts.push(formatMonthLabel(currentMonth));
+  }
+
+  return { list: list.sort(compareChronological), label: parts.join(' · '), category, month, year };
+}
+
+// ---- Befehle erkennen -------------------------------------------------------
+function parseAssistantCommand(raw) {
+  const s = raw.trim();
+  const lower = s.toLowerCase();
+
+  // Abfragen / Karteikarten
+  if (/\b(frag|frage|fragen|prüf|pruef|prüfe|pruefe|quiz|teste|abfragen|abfrage|durchgehen|nochmals durch)\b/.test(lower)
+      && !/^wie ?viel/.test(lower)) {
+    return { type: 'quiz', arg: s };
+  }
+
+  // Anzeigen / filtern
+  if (/^(zeig|zeige|zeig mir|öffne|oeffne|liste|filter|filtere)\b/.test(lower)) {
+    return { type: 'show', arg: s };
+  }
+
+  // Rechnen
+  if (/^(wie ?viel|wieviel|was habe ich|summe|total)\b/.test(lower)) {
+    return { type: 'sum', arg: s };
+  }
+
+  // Stand / Überblick
+  if (/\b(wie (stehe|steht) ich|überblick|ueberblick|zusammenfassung|status|wie läuft|wie laeuft)\b/.test(lower)) {
+    return { type: 'status', arg: s };
+  }
+
+  // Monat wechseln
+  if (/^(spring|springe|wechsle|geh zu|gehe zu|zeig monat|setze monat)\b/.test(lower)) {
+    return { type: 'goto', arg: s };
+  }
+
+  // Export / Backup
+  if (/\b(exportier|excel (herunterladen|runterladen|erstellen)|export)\b/.test(lower)) return { type: 'export' };
+  if (/\b(backup|sicherung|datensicherung)\b/.test(lower) && /\b(mach|mache|erstell|erstelle|speicher|speichere|herunterladen|runterladen)\b/.test(lower)) {
+    return { type: 'backup' };
+  }
+
+  // Hilfe
+  if (/^(hilfe|was kannst du|befehle|kommandos|hilf mir)\b/.test(lower)) return { type: 'help' };
+
+  return null;
+}
+
+const ASSISTANT_HELP = [
+  'Das kann ich für dich tun:',
+  '• „Frage mich nochmals auf alle Einnahmen ab“ — startet die Karteikarten mit dieser Auswahl',
+  '• „Frage mich auf Verpflegung im August ab“',
+  '• „Zeige mir die Ausgaben für Hobbies“ — öffnet die gefilterte Liste',
+  '• „Wie viel habe ich im August für Verpflegung ausgegeben?“',
+  '• „Wie stehe ich diesen Monat?“ — kurzer Überblick',
+  '• „Springe zu Juli 2026“',
+  '• „Exportiere das Excel“ · „Mache ein Backup“',
+  '• „Aldi ist Verpflegung“ — feste Regel lernen · „vergiss Aldi“',
+].join('\n');
+
+// ---- Befehle ausführen ------------------------------------------------------
+function runAssistantCommand(cmd) {
+  switch (cmd.type) {
+    case 'help':
+      return ASSISTANT_HELP;
+
+    case 'quiz': {
+      const sel = selectTransactions(cmd.arg);
+      if (!sel.list.length) {
+        return `Dafür finde ich keine Buchungen (${sel.label}). Versuch es z. B. mit „frage mich auf alle Einnahmen ab“.`;
+      }
+      setActiveTab('panel-review');
+      startReviewSessionWith(sel.list, sel.label);
+      return `Los geht's: ${plural(sel.list.length, 'Karte', 'Karten')} — ${sel.label}. Nach rechts ziehen übernimmt den Vorschlag, oder wähle direkt eine Kategorie.`;
+    }
+
+    case 'show': {
+      const sel = selectTransactions(cmd.arg);
+      if (!sel.category) {
+        return 'Welche Kategorie soll ich zeigen? Z. B. „zeige mir die Ausgaben für Verpflegung“.';
+      }
+      const bounds = sel.year
+        ? { from: `${sel.year}-01-01`, to: `${sel.year}-12-31`, label: sel.year }
+        : (sel.month
+            ? { from: `${sel.month}-01`, to: `${sel.month}-31`, label: formatMonthLabel(sel.month) }
+            : null);
+      setCategoryFilter(sel.category, bounds);
+      return sel.list.length
+        ? `${sel.category}: ${plural(sel.list.length, 'Eintrag', 'Einträge')} über ${formatCurrency(sumAmounts(sel.list))} (${bounds ? bounds.label : formatMonthLabel(currentMonth)}).`
+        : `Für ${sel.category} finde ich in diesem Zeitraum keine Einträge.`;
+    }
+
+    case 'sum': {
+      const sel = selectTransactions(cmd.arg);
+      if (!sel.list.length) return `Dafür finde ich keine Buchungen (${sel.label}).`;
+      const total = sumAmounts(sel.list);
+      const avg = total / sel.list.length;
+      return `${sel.label}: ${formatCurrency(total)} aus ${plural(sel.list.length, 'Eintrag', 'Einträge')} `
+        + `(Ø ${formatCurrency(avg)} pro Eintrag).`;
+    }
+
+    case 'status': {
+      const month = detectMonthInText(cmd.arg) || currentMonth;
+      const tx = monthTransactionsOf(month);
+      if (!tx.length) return `Für ${formatMonthLabel(month)} habe ich noch keine Buchungen.`;
+      const spending = sumAmounts(tx.filter(countsAsSpending));
+      const income = sumAmounts(tx.filter(isIncome));
+      const open = tx.filter(t => t.uncertain).length;
+      const byCat = {};
+      tx.filter(countsAsSpending).forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+      const top = Object.entries(byCat).sort((a, b) => b[1] - a[1])[0];
+      const lines = [
+        `${formatMonthLabel(month)}: ${formatCurrency(spending)} ausgegeben, ${formatCurrency(income)} eingenommen.`,
+        top ? `Grösste Kategorie: ${top[0]} mit ${formatCurrency(top[1])}.` : null,
+      ];
+      const goal = goals.overall;
+      if (goal) {
+        const pct = Math.round((spending / goal) * 100);
+        lines.push(`Gesamtbudget: ${pct}% von ${formatCurrency(goal)} ${pct > 100 ? 'überschritten' : 'genutzt'}.`);
+      }
+      const b = monthBalance(month);
+      if (b) lines.push(`Saldo: ${formatCurrency(b.start)} → ${formatCurrency(b.end)}.`);
+      lines.push(open ? `${plural(open, 'Eintrag wartet', 'Einträge warten')} noch auf deine Zuordnung.` : 'Alles zugeordnet.');
+      return lines.filter(Boolean).join('\n');
+    }
+
+    case 'goto': {
+      const month = detectMonthInText(cmd.arg);
+      if (!month) return 'Zu welchem Monat? Z. B. „springe zu Juli 2026“.';
+      currentMonth = month;
+      rangeAnchor = null;
+      setActiveTab('panel-overview');
+      render();
+      return `Bin bei ${formatMonthLabel(month)}.`;
+    }
+
+    case 'export':
+      exportYearlyExcel();
+      return 'Excel wird erstellt — die Datei landet in deinen Downloads.';
+
+    case 'backup':
+      exportBackup();
+      return 'Backup heruntergeladen. Leg die Datei am besten in deinen OneDrive-Ordner.';
+
+    default:
+      return null;
+  }
+}
 function handleTeachInput(raw) {
+  // Befehle gehen vor: „frage mich auf Verpflegung ab“ ist kein Lehrsatz, obwohl eine
+  // Kategorie darin vorkommt.
+  const cmd = parseAssistantCommand(raw);
+  if (cmd) {
+    const answer = runAssistantCommand(cmd);
+    if (answer) return answer;
+  }
+
   const result = parseTeachInput(raw);
   switch (result.type) {
     case 'empty':
       return 'Sag mir kurz, welcher Händler zu welcher Kategorie gehört, z. B. „Aldi ist Verpflegung“.';
     case 'unrecognized':
-      return `Ich konnte keine Kategorie erkennen. Verfügbare Kategorien: ${CATEGORIES.map(c => c.name).join(', ')}.`;
+      return `Das habe ich nicht verstanden.\n\n${ASSISTANT_HELP}`;
     case 'too_vague':
       return `Das ist mir zu allgemein für eine Regel${result.category ? ` (${result.category})` : ''}. Nenne einen konkreten Händlernamen, z. B. „Aldi ist ${result.category || 'Verpflegung'}“.`;
     case 'too_long':
@@ -3181,22 +3493,36 @@ document.getElementById('patternsList').addEventListener('click', (e) => {
   showToast('Muster vergessen.');
 });
 
-const TEACH_WELCOME_MESSAGE = 'Hallo! Ich bin kein echter KI-Chat, sondern ein einfacher Lern-Assistent: Ich merke mir feste Regeln wie „Aldi ist Verpflegung“ und wende sie danach automatisch an. Zusätzlich lernt die App aus deinen Zuordnungen: Ab fünf gleichen Zuordnungen hintereinander ordnet sie selbst zu – die ersten Male noch mit Rückfrage in den Karten.';
+const TEACH_WELCOME_MESSAGE = 'Hallo! Ich bin kein Sprachmodell, sondern ein Befehlsassistent: Ich verstehe eine feste Menge an Anweisungen und führe sie in der App aus.\n\n'
+  + ASSISTANT_HELP
+  + '\n\nSchreib „Hilfe“, wenn du das nochmal sehen willst.';
 
 if (!teachChatHistory.length) appendChatMessage('bot', TEACH_WELCOME_MESSAGE);
 else renderTeachChatLogFromHistory();
 renderTeachRulesList();
 renderPatternsList();
 
+function submitToAssistant(val) {
+  if (!val) return;
+  appendChatMessage('user', val);
+  appendChatMessage('bot', handleTeachInput(val));
+  renderTeachRulesList();
+  renderPatternsList();
+}
+
 document.getElementById('teachForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const input = document.getElementById('teachInput');
   const val = input.value.trim();
-  if (!val) return;
-  appendChatMessage('user', val);
-  appendChatMessage('bot', handleTeachInput(val));
+  submitToAssistant(val);
   input.value = '';
-  renderTeachRulesList();
+});
+
+// Vorschlagsknöpfe: zeigen, was möglich ist, ohne dass man es tippen muss.
+document.getElementById('teachSuggestions').addEventListener('click', (e) => {
+  const btn = e.target.closest('.teach-suggestion');
+  if (!btn) return;
+  submitToAssistant(btn.textContent.trim());
 });
 
 document.getElementById('teachRulesList').addEventListener('click', (e) => {
