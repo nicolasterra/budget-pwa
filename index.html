@@ -49,8 +49,8 @@
   </button>
   <button type="button" class="tab-btn" id="tab-history" data-panel="panel-history"
           role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">
-    <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.5" width="14" height="12" rx="2"/><line x1="3" y1="8" x2="17" y2="8"/><line x1="7" y1="2.5" x2="7" y2="5.5"/><line x1="13" y1="2.5" x2="13" y2="5.5"/></svg>
-    <span class="tab-label">Verlauf</span>
+    <svg class="icon tab-icon" viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="16.5" x2="4" y2="11"/><line x1="10" y1="16.5" x2="10" y2="4"/><line x1="16" y1="16.5" x2="16" y2="8"/></svg>
+    <span class="tab-label">Analytics</span>
   </button>
   <button type="button" class="tab-btn" id="tab-review" data-panel="panel-review"
           role="tab" aria-selected="false" aria-controls="panel-review" tabindex="-1">
@@ -112,6 +112,19 @@
           <span class="card-value" id="txCount">0</span>
         </div>
       </div>
+
+      <div class="balance-row" id="balanceRow" hidden>
+        <div class="balance-item">
+          <span class="card-label">Saldo Anfang Monat</span>
+          <span class="card-value" id="balanceStart">–</span>
+        </div>
+        <svg class="icon balance-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10h13M12 6l4 4-4 4"/></svg>
+        <div class="balance-item">
+          <span class="card-label">Saldo Ende Monat</span>
+          <span class="card-value" id="balanceEnd">–</span>
+        </div>
+        <p class="balance-note" id="balanceNote"></p>
+      </div>
     </div>
 
     <div class="dashboard-block goals-block">
@@ -129,7 +142,19 @@
     </div>
 
     <div class="dashboard-block categories-block">
-      <h2>Kategorien</h2>
+      <div class="section-header">
+        <h2>Kategorien</h2>
+        <label class="sort-control">
+          <span class="sort-label">Sortieren</span>
+          <select id="categorySort">
+            <option value="amount">Betrag, grösste zuerst</option>
+            <option value="amount-asc">Betrag, kleinste zuerst</option>
+            <option value="name">Name A–Z</option>
+            <option value="count">Anzahl Einträge</option>
+          </select>
+        </label>
+      </div>
+      <p class="import-hint">Tippe eine Kategorie an, um ihre Ausgaben zu sehen.</p>
       <div id="categoryList" class="category-list"></div>
       <div id="categoryAsideWrap" hidden>
         <p class="list-divider">zählt nicht ins Total</p>
@@ -140,7 +165,7 @@
 
   <section class="history-section tab-panel" id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
     <div class="section-header">
-      <h2>Verlauf</h2>
+      <h2>Analytics</h2>
       <div class="header-actions">
         <button type="button" id="exportExcelBtn" class="btn-secondary">
           <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10M6 9l4 4 4-4"/><path d="M3.5 15v1.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V15"/></svg>
@@ -148,8 +173,51 @@
         </button>
       </div>
     </div>
-    <div id="historyList" class="history-list"></div>
-    <p id="historyEmptyState" class="empty-state" hidden>Noch keine Monate mit Ausgaben vorhanden.</p>
+
+    <div class="segmented" id="rangeSegmented" role="tablist" aria-label="Zeitraum">
+      <button type="button" class="segment" data-range="week" role="tab" aria-selected="false">Woche</button>
+      <button type="button" class="segment" data-range="month" role="tab" aria-selected="true">Monat</button>
+      <button type="button" class="segment" data-range="year" role="tab" aria-selected="false">Jahr</button>
+      <span class="segment-indicator" id="segmentIndicator" aria-hidden="true"></span>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-head">
+        <div>
+          <p class="chart-label" id="chartPeriodLabel"></p>
+          <p class="chart-hero" id="chartTotal">CHF 0.00</p>
+          <p class="chart-sub" id="chartSub"></p>
+        </div>
+        <div class="chart-head-actions">
+          <button type="button" class="btn-icon" id="rangePrev" aria-label="Vorheriger Zeitraum">
+            <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4l-5 6 5 6"/></svg>
+          </button>
+          <button type="button" class="btn-icon" id="rangeNext" aria-label="Nächster Zeitraum">
+            <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M8 4l5 6-5 6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="chart-body" id="chartBody"></div>
+
+      <div class="chart-foot">
+        <p class="chart-note" id="chartNote"></p>
+        <button type="button" class="btn-link" id="chartTableToggle" aria-expanded="false">Als Tabelle</button>
+      </div>
+      <div class="chart-table-wrap" id="chartTableWrap" hidden></div>
+    </div>
+
+    <div class="dashboard-block">
+      <div class="section-header"><h2>Kategorien im Zeitraum</h2></div>
+      <div id="rangeCategoryList" class="category-list"></div>
+      <p id="rangeCategoryEmpty" class="empty-state" hidden>Keine Ausgaben in diesem Zeitraum.</p>
+    </div>
+
+    <div class="dashboard-block">
+      <div class="section-header"><h2>Monate</h2></div>
+      <div id="historyList" class="history-list"></div>
+      <p id="historyEmptyState" class="empty-state" hidden>Noch keine Monate mit Ausgaben vorhanden.</p>
+    </div>
   </section>
 
   <section class="review-section tab-panel" id="panel-review" role="tabpanel" aria-labelledby="tab-review" hidden>
@@ -185,6 +253,12 @@
       </div>
     </div>
     <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+    <div id="categoryFilterChip" class="filter-chip" hidden>
+      <span class="filter-chip-dot" id="categoryFilterDot"></span>
+      <span>Kategorie: <strong id="categoryFilterName"></strong></span>
+      <span class="filter-chip-count" id="categoryFilterCount"></span>
+      <button type="button" id="categoryFilterClear" class="filter-chip-clear" aria-label="Filter aufheben">✕</button>
+    </div>
     <p id="importSourceInfo" class="import-source-info" hidden></p>
     <div id="transactionList" class="transaction-list"></div>
     <p id="emptyState" class="empty-state" hidden>Noch keine Einträge für diesen Monat. Füge einen Eintrag hinzu oder importiere dein Excel/CSV.</p>
@@ -276,6 +350,9 @@
       <label>Kategorie-Spalte
         <select id="mapCategory"></select>
       </label>
+      <label>Saldo-Spalte
+        <select id="mapBalance"></select>
+      </label>
       <label id="mapSignLabel">Vorzeichen-Logik
         <select id="mapSign">
           <option value="negative">Negativ = Ausgabe, positiv = Gutschrift</option>
@@ -337,6 +414,7 @@
         <span id="reviewStampSkip" class="review-stamp review-stamp-skip">Später</span>
         <div class="review-card-body">
           <p id="reviewCardDesc" class="review-card-desc"></p>
+          <p id="reviewCardRaw" class="review-card-raw" hidden></p>
           <p id="reviewCardMeta" class="review-card-meta"></p>
           <p id="reviewCardReason" class="review-card-reason"></p>
           <span id="reviewCardCategory" class="review-card-category-badge"></span>

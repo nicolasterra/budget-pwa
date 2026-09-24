@@ -2,28 +2,43 @@ const STORAGE_KEY = 'budget_transactions';
 const CURRENCY = 'CHF';
 const LOCALE = 'de-CH';
 
+// Farben sind gegen die helle und die dunkle Fläche auf mindestens 3:1 geprüft,
+// damit ein Balken in keinem Modus ausgewaschen wirkt.
 const CATEGORIES = [
-  { name: 'Ausgang', color: '#f28e2b' },
+  { name: 'Ausgang', color: '#c1701a' },
   { name: 'Verpflegung', color: '#59a14f' },
-  { name: 'Kleidung', color: '#ff9da7' },
+  { name: 'Kleidung', color: '#cc6072' },
   { name: 'Hobbies', color: '#b07aa1' },
-  { name: 'Friseur', color: '#86bcb6' },
+  { name: 'Friseur', color: '#58938c' },
   { name: 'Geschenke', color: '#d37295' },
   { name: 'Mobile Daten', color: '#4e79a7' },
   { name: 'El. Geräte', color: '#7c83fd' },
-  { name: 'Ferien', color: '#76b7b2' },
+  { name: 'Ferien', color: '#2e857f' },
   { name: 'Auto', color: '#9c755f' },
   { name: 'SBB', color: '#e15759' },
-  { name: 'Cevi', color: '#06b6d4' },
+  { name: 'Cevi', color: '#0b8ea6' },
   { name: 'Konto Übertragung', color: '#8891a3' },
   { name: 'Noch auszuwählen', color: '#ef4444' },
 ];
 
 const FALLBACK_CATEGORY = 'Noch auszuwählen';
 
-// Gutschriften (Zahlungseingänge) brauchen keine Ausgaben-Kategorie – sie bekommen diese Sonderkategorie.
-const INCOME_CATEGORY = 'Einnahme';
-const INCOME_COLOR = '#3a7d5c';
+// Einnahmen haben ihre eigene Liste – „Lohn“ oder „Spesen“ wären als Ausgabe sinnlos.
+const INCOME_CATEGORIES = [
+  { name: 'Lohn', color: '#2f7d5d' },
+  { name: 'Spesen', color: '#4e79a7' },
+  { name: 'Cevi', color: '#0b8ea6' },
+  { name: 'Geld erhalten', color: '#58938c' },
+  { name: 'Rückerstattung', color: '#9c755f' },
+  { name: 'Geschenk', color: '#d37295' },
+  { name: 'Konto Übertragung', color: '#8891a3' },
+  { name: 'Noch auszuwählen', color: '#ef4444' },
+];
+
+// Vor der Einführung der Einnahme-Kategorien bekamen alle Gutschriften diese eine.
+const LEGACY_INCOME_CATEGORY = 'Einnahme';
+const LEGACY_CATEGORY_COLORS = { [LEGACY_INCOME_CATEGORY]: '#2f7d5d' };
+
 const TX_EXPENSE = 'expense';
 const TX_INCOME = 'income';
 
@@ -57,6 +72,31 @@ const CATEGORY_KEYWORDS = {
   'Cevi': ['cevi'],
 };
 
+// Stichwörter für Gutschriften. Auch hier entscheidet die App nichts von selbst:
+// Treffer sind Vorschläge und wandern zur Bestätigung in die Karten.
+const INCOME_KEYWORDS = {
+  'Lohn': ['lohn', 'salär', 'salaer', 'gehalt', 'eth zürich', 'eth zurich'],
+  'Cevi': ['cevi', 'jungschar', 'kirche'],
+  'Rückerstattung': ['rückgutschrift', 'rueckgutschrift', 'rückzahlung', 'rueckzahlung', 'rückerstattung'],
+  'Konto Übertragung': ['übertrag', 'uebertrag'],
+  'Geld erhalten': ['twint-gutschrift', 'geld erhalten'],
+  'Spesen': ['spesen'],
+};
+
+function categoryListFor(type) {
+  return type === TX_INCOME ? INCOME_CATEGORIES : CATEGORIES;
+}
+
+// Eine gelernte Regel oder ein Muster kann aus der anderen Liste stammen („Lohn“ bei einer
+// Ausgabe). Solche Treffer werden verworfen, statt eine unmögliche Kategorie zu setzen.
+function isValidCategory(name, type) {
+  return categoryListFor(type).some(c => c.name === name);
+}
+
+function keywordsFor(type) {
+  return type === TX_INCOME ? INCOME_KEYWORDS : CATEGORY_KEYWORDS;
+}
+
 const RULES_STORAGE_KEY = 'budget_learned_rules';
 
 let learnedRules = loadLearnedRules();
@@ -84,9 +124,9 @@ function matchLearnedRule(text) {
 // Alle anderen Treffer sind reine Vorschläge und landen zur Bestätigung in den Karten.
 const AUTO_ASSIGN_CATEGORIES = new Set(['Verpflegung']);
 
-function matchBuiltinKeywords(text) {
+function matchBuiltinKeywords(text, type) {
   const matches = [];
-  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+  for (const [category, keywords] of Object.entries(keywordsFor(type))) {
     for (const kw of keywords) {
       let from = 0;
       while (true) {
@@ -215,9 +255,10 @@ function guessCategory(description, amount, type = TX_EXPENSE) {
   const text = (description || '').toLowerCase();
 
   const learned = matchLearnedRule(text);
-  if (learned) return { category: learned, certain: true, reason: 'rule' };
+  if (learned && isValidCategory(learned, type)) return { category: learned, certain: true, reason: 'rule' };
 
-  const pattern = lookupPattern(description, amount);
+  const patternRaw = lookupPattern(description, amount);
+  const pattern = (patternRaw && isValidCategory(patternRaw.entry.category, type)) ? patternRaw : null;
   if (pattern && pattern.trusted) {
     const probation = (pattern.entry.autoCount || 0) < PATTERN_PROBATION_COUNT;
     return {
@@ -229,8 +270,10 @@ function guessCategory(description, amount, type = TX_EXPENSE) {
     };
   }
 
-  const builtin = matchBuiltinKeywords(text);
-  const builtinCertain = !!builtin && builtin.categories.size === 1 && AUTO_ASSIGN_CATEGORIES.has(builtin.category);
+  const builtin = matchBuiltinKeywords(text, type);
+  // Bei Gutschriften entscheidet die App nie von selbst – dort gibt es keine Freigabeliste.
+  const builtinCertain = !!builtin && builtin.categories.size === 1
+    && type !== TX_INCOME && AUTO_ASSIGN_CATEGORIES.has(builtin.category);
 
   if (pattern) {
     // Noch nicht oft genug bestätigt: die bisherige Wahl vorschlagen, aber prüfen lassen.
@@ -249,7 +292,6 @@ function guessCategory(description, amount, type = TX_EXPENSE) {
     return { category: builtin.category, certain: false, reason: builtin.categories.size > 1 ? 'ambiguous' : 'suggestion' };
   }
 
-  if (type === TX_INCOME) return { category: INCOME_CATEGORY, certain: true, reason: 'income' };
   return { category: FALLBACK_CATEGORY, certain: false, reason: 'no_match' };
 }
 
@@ -261,6 +303,7 @@ const REVIEW_REASON_TEXT = {
   pattern_probation: 'erste automatische Zuordnung, bitte bestätigen',
   unknown_file_category: 'Kategorie aus Datei unbekannt',
   file_unassigned: 'in der Datei nicht zugeordnet',
+  income_recategorize: 'Gutschriften bekommen jetzt eigene Kategorien',
 };
 
 function reviewReasonText(t) {
@@ -297,6 +340,13 @@ function migrateTransactions(list) {
     if (t.type !== TX_INCOME && t.type !== TX_EXPENSE) t.type = TX_EXPENSE;
     if (typeof t.seq !== 'number') t.seq = -i;
     if (typeof t.amount !== 'number') t.amount = Number(t.amount) || 0;
+    // Früher bekamen alle Gutschriften die Sammelkategorie „Einnahme“. Jetzt gibt es
+    // echte Einnahme-Kategorien, also zurück in die Prüfliste statt still umbenennen.
+    if (t.type === TX_INCOME && t.category === LEGACY_INCOME_CATEGORY) {
+      t.category = FALLBACK_CATEGORY;
+      t.uncertain = true;
+      t.reason = 'income_recategorize';
+    }
   });
   return list;
 }
@@ -399,17 +449,18 @@ function getMonthTransactions() {
   return monthTransactionsOf(currentMonth).sort(compareChronological);
 }
 
-function categoryColor(name) {
-  if (name === INCOME_CATEGORY) return INCOME_COLOR;
-  const found = CATEGORIES.find(c => c.name === name);
-  return found ? found.color : '#64748b';
+// Gleiche Namen kommen in beiden Listen vor (Cevi, Konto Übertragung). Der Typ entscheidet,
+// welche Liste zuerst befragt wird; die andere dient als Rückfall für Altdaten.
+function categoryColor(name, type) {
+  const primary = categoryListFor(type).find(c => c.name === name);
+  if (primary) return primary.color;
+  const other = categoryListFor(type === TX_INCOME ? TX_EXPENSE : TX_INCOME).find(c => c.name === name);
+  if (other) return other.color;
+  return LEGACY_CATEGORY_COLORS[name] || '#8891a3';
 }
 
-// Auswählbare Kategorien: Gutschriften bekommen zusätzlich „Einnahme“ angeboten.
 function selectableCategories(type) {
-  const list = CATEGORIES.map(c => ({ name: c.name, color: c.color }));
-  if (type === TX_INCOME) list.unshift({ name: INCOME_CATEGORY, color: INCOME_COLOR });
-  return list;
+  return categoryListFor(type).map(c => ({ name: c.name, color: c.color }));
 }
 
 function escapeHtml(str) {
@@ -427,7 +478,7 @@ function escapeAttr(str) {
 
 function buildCategoryOptions(selected, type) {
   const list = selectableCategories(type);
-  if (selected && !list.some(c => c.name === selected)) list.push({ name: selected, color: categoryColor(selected) });
+  if (selected && !list.some(c => c.name === selected)) list.push({ name: selected, color: categoryColor(selected, type) });
   return list.map(c => `<option value="${escapeAttr(c.name)}" ${c.name === selected ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
 }
 
@@ -452,6 +503,7 @@ function logCategorization(t, fromCategory, toCategory) {
     amount: t.amount,
     fromCategory,
     toCategory,
+    type: t.type,
     timestamp: Date.now(),
   });
   if (categorizationLog.length > MAX_CATEGORIZATION_LOG) {
@@ -537,6 +589,67 @@ function barMarkup(className, pct, color) {
   return `<div class="${className}" style="${style}"></div>`;
 }
 
+// ---- Sortierung und Filter der Kategorien ------------------------------------
+const CATEGORY_SORT_KEY = 'budget_category_sort';
+
+let categorySort = (() => {
+  try {
+    const saved = localStorage.getItem(CATEGORY_SORT_KEY);
+    return ['amount', 'amount-asc', 'name', 'count'].includes(saved) ? saved : 'amount';
+  } catch { return 'amount'; }
+})();
+
+// Filter für den Reiter „Ausgaben“: null = alles zeigen.
+let categoryFilter = null;
+
+function renderCategoryFilterChip(count) {
+  const wrap = document.getElementById('categoryFilterChip');
+  if (!categoryFilter) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  document.getElementById('categoryFilterName').textContent = categoryFilter;
+  document.getElementById('categoryFilterCount').textContent = plural(count, 'Eintrag', 'Einträge');
+  document.getElementById('categoryFilterDot').style.background = categoryColor(categoryFilter, TX_EXPENSE);
+}
+
+function setCategoryFilter(name) {
+  categoryFilter = name;
+  setActiveTab('panel-transactions');
+  render();
+}
+
+function sortCategoryEntries(list, counts) {
+  const sorted = list.slice();
+  if (categorySort === 'amount') sorted.sort((a, b) => b[1] - a[1]);
+  else if (categorySort === 'amount-asc') sorted.sort((a, b) => a[1] - b[1]);
+  else if (categorySort === 'name') sorted.sort((a, b) => a[0].localeCompare(b[0], LOCALE));
+  else if (categorySort === 'count') sorted.sort((a, b) => (counts[b[0]] || 0) - (counts[a[0]] || 0) || b[1] - a[1]);
+  return sorted;
+}
+
+// Zeigt Anfangs- und Endsaldo des Monats und prüft sie gegen die eigenen Zahlen:
+// Anfang + Gutschriften − Belastungen muss den Endsaldo ergeben. Weicht es ab, fehlen
+// Buchungen (z. B. nur ein Teil des Monats importiert) – dann lieber warnen als schweigen.
+function renderBalanceRow(income, spending, transfers) {
+  const row = document.getElementById('balanceRow');
+  const b = monthBalance(currentMonth);
+  if (!b) { row.hidden = true; return; }
+  row.hidden = false;
+
+  document.getElementById('balanceStart').textContent = formatCurrency(b.start);
+  document.getElementById('balanceEnd').textContent = formatCurrency(b.end);
+
+  const expected = round2(b.start + income - spending - transfers);
+  const diff = round2(b.end - expected);
+  const note = document.getElementById('balanceNote');
+  if (Math.abs(diff) < 0.01) {
+    note.textContent = 'Stimmt mit den erfassten Buchungen überein.';
+    note.className = 'balance-note is-ok';
+  } else {
+    note.textContent = `Abweichung ${formatCurrency(Math.abs(diff))} — es fehlen wohl Buchungen in diesem Monat.`;
+    note.className = 'balance-note is-warn';
+  }
+}
+
 function render() {
   document.getElementById('currentMonthLabel').textContent = formatMonthLabel(currentMonth);
 
@@ -557,32 +670,39 @@ function render() {
   document.getElementById('monthTransfers').textContent = formatCurrency(transfers);
 
   document.getElementById('welcomeCard').hidden = transactions.length > 0;
+  renderBalanceRow(income, total, transfers);
   renderHeroDelta(currentMonth);
 
   // Gezählte und nicht gezählte Kategorien getrennt ausweisen.
   const byCategory = {};
+  const countByCategory = {};
   monthTx.filter(isExpense).forEach(t => {
     byCategory[t.category] = (byCategory[t.category] || 0) + t.amount;
+    countByCategory[t.category] = (countByCategory[t.category] || 0) + 1;
   });
   const entries = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
-  const counted = entries.filter(([name]) => !NON_SPENDING_CATEGORIES.has(name));
+  const counted = sortCategoryEntries(entries.filter(([name]) => !NON_SPENDING_CATEGORIES.has(name)), countByCategory);
   const aside = entries.filter(([name]) => NON_SPENDING_CATEGORIES.has(name));
 
-  document.getElementById('topCategory').textContent = counted.length ? counted[0][0] : '–';
+  // „Grösste Kategorie“ bleibt die grösste, unabhängig von der gewählten Sortierung.
+  const biggest = entries.filter(([name]) => !NON_SPENDING_CATEGORIES.has(name));
+  document.getElementById('topCategory').textContent = biggest.length ? biggest[0][0] : '–';
 
-  const maxAmount = counted.length ? counted[0][1] : 0;
+  const maxAmount = biggest.length ? biggest[0][1] : 0;
   const categoryListEl = document.getElementById('categoryList');
   categoryListEl.innerHTML = counted.length
     ? counted.map(([name, amount], i) => `
-        <div class="category-row" style="--i:${i}">
+        <button type="button" class="category-row" style="--i:${i}" data-category="${escapeAttr(name)}"
+                aria-label="${escapeAttr(name)}: ${formatCurrency(amount)}, Ausgaben anzeigen">
           <div class="category-row-top">
             <span>${escapeHtml(name)}</span>
             <span>${formatCurrency(amount)}</span>
           </div>
           <div class="category-bar-track">
-            ${barMarkup('category-bar-fill', maxAmount ? (amount / maxAmount) * 100 : 0, categoryColor(name))}
+            ${barMarkup('category-bar-fill', maxAmount ? (amount / maxAmount) * 100 : 0, categoryColor(name, TX_EXPENSE))}
           </div>
-        </div>`).join('')
+          <span class="category-row-count">${plural(countByCategory[name] || 0, 'Eintrag', 'Einträge')}</span>
+        </button>`).join('')
     : '<p class="empty-state">Noch keine Daten für diesen Monat.</p>';
 
   document.getElementById('categoryAsideWrap').hidden = aside.length === 0;
@@ -596,13 +716,18 @@ function render() {
 
   renderGoalsSection(total, byCategory);
   renderImportSourceInfo();
+  renderRangeChart();
   renderHistoryList();
   renderReviewQueue();
   renderBackupStatus();
 
+  // Reiter „Ausgaben“: optional auf eine Kategorie eingeschränkt.
+  const visibleTx = categoryFilter ? monthTx.filter(t => t.category === categoryFilter) : monthTx;
+  renderCategoryFilterChip(visibleTx.length);
+
   const txListEl = document.getElementById('transactionList');
-  document.getElementById('emptyState').hidden = monthTx.length > 0;
-  txListEl.innerHTML = monthTx.map((t, i) => {
+  document.getElementById('emptyState').hidden = visibleTx.length > 0;
+  txListEl.innerHTML = visibleTx.map((t, i) => {
     const credit = isIncome(t);
     const classes = ['transaction-item'];
     if (t.uncertain) classes.push('needs-category');
@@ -614,7 +739,7 @@ function render() {
     if (t.uncertain) meta.push(reviewReasonText(t));
     return `
       <div class="${classes.join(' ')}" style="--i:${i}">
-        <span class="tx-dot" style="background:${categoryColor(t.category)}"></span>
+        <span class="tx-dot" style="background:${categoryColor(t.category, t.type)}"></span>
         <div class="tx-info">
           <span class="tx-desc">${escapeHtml(t.description)}</span>
           <span class="tx-meta">${escapeHtml(meta.join(' · '))}</span>
@@ -848,13 +973,22 @@ function renderReviewCard() {
     `${reviewSession.index + 1} / ${reviewSession.ids.length}`;
   document.getElementById('reviewProgressFill').style.width =
     `${(reviewSession.index / reviewSession.ids.length) * 100}%`;
-  document.getElementById('reviewCardDesc').textContent = t.description;
+  // Buchungstexte der Bank sind oft eine lange Kette aus Floskeln und Referenznummern.
+  // Der Händlerkern kommt gross nach oben, der Rohtext klein darunter.
+  const descEl = document.getElementById('reviewCardDesc');
+  const rawEl = document.getElementById('reviewCardRaw');
+  const core = normalizeDescription(t.description);
+  const showCore = core.length >= 3 && core.length < t.description.trim().length;
+  descEl.textContent = showCore ? core : t.description;
+  descEl.classList.toggle('is-long', (showCore ? core : t.description).length > 38);
+  rawEl.textContent = showCore ? t.description : '';
+  rawEl.hidden = !showCore;
   document.getElementById('reviewCardMeta').textContent =
     `${formatDate(t.date)} · ${isIncome(t) ? '+ ' : ''}${formatCurrency(t.amount)} · ${isIncome(t) ? 'Gutschrift' : 'Ausgabe'}`;
   document.getElementById('reviewCardReason').textContent = reviewReasonText(t);
   const badge = document.getElementById('reviewCardCategory');
   badge.textContent = t.category;
-  badge.style.background = categoryColor(t.category);
+  badge.style.background = categoryColor(t.category, t.type);
 
   document.getElementById('reviewChipGrid').innerHTML = selectableCategories(t.type).map(c => `
     <button type="button" class="review-chip" data-category="${escapeAttr(c.name)}">
@@ -997,42 +1131,86 @@ document.getElementById('reviewChipGrid').addEventListener('click', (e) => {
   assignReviewCategory(chip.dataset.category);
 });
 
+// Auslöseschwelle richtet sich nach der Kartenbreite: auf einem schmalen Telefon wären
+// feste 100px fast die halbe Karte, am Laptop kaum ein Ruck.
+function swipeThreshold() {
+  return Math.max(56, Math.min(120, reviewCard.offsetWidth * 0.28));
+}
+
+function endCardDrag() {
+  cardDrag = null;
+  reviewCard.classList.remove('dragging');
+}
+
 reviewCard.addEventListener('pointerdown', (e) => {
   if (!currentReviewTx()) return;
-  cardDrag = { startX: e.clientX, dx: 0 };
-  reviewCard.setPointerCapture(e.pointerId);
+  // Ein zweiter Finger während einer laufenden Geste würde die Karte springen lassen.
+  if (cardDrag) return;
+  cardDrag = { id: e.pointerId, startX: e.clientX, startY: e.clientY, dx: 0, axis: null };
+  // Wirft, wenn der Zeiger zwischenzeitlich schon weg ist. Ohne Auffangen bliebe die
+  // Karte mit gesetztem cardDrag schief stehen.
+  try { reviewCard.setPointerCapture(e.pointerId); } catch {}
   reviewCard.classList.add('dragging');
 });
 
 reviewCard.addEventListener('pointermove', (e) => {
-  if (!cardDrag) return;
-  cardDrag.dx = e.clientX - cardDrag.startX;
-  reviewCard.style.transform = `translateX(${cardDrag.dx}px) rotate(${cardDrag.dx / 20}deg)`;
-  document.getElementById('reviewStampAccept').style.opacity = String(Math.max(0, Math.min(1, cardDrag.dx / 100)));
-  document.getElementById('reviewStampSkip').style.opacity = String(Math.max(0, Math.min(1, -cardDrag.dx / 100)));
+  if (!cardDrag || e.pointerId !== cardDrag.id) return;
+  const dx = e.clientX - cardDrag.startX;
+  const dy = e.clientY - cardDrag.startY;
+
+  // Richtung einmal festlegen: Wer senkrecht wischt, will scrollen – dann lassen wir die
+  // Karte los, statt gegen die Scrollbewegung zu ziehen.
+  if (!cardDrag.axis && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+    cardDrag.axis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+    if (cardDrag.axis === 'y') {
+      endCardDrag();
+      resetCardPosition();
+      return;
+    }
+  }
+  if (cardDrag.axis !== 'x') return;
+
+  cardDrag.dx = dx;
+  const limit = swipeThreshold();
+  reviewCard.style.transform = `translateX(${dx}px) rotate(${dx / 20}deg)`;
+  document.getElementById('reviewStampAccept').style.opacity = String(Math.max(0, Math.min(1, dx / limit)));
+  document.getElementById('reviewStampSkip').style.opacity = String(Math.max(0, Math.min(1, -dx / limit)));
 });
 
-reviewCard.addEventListener('pointerup', () => {
-  if (!cardDrag) return;
+reviewCard.addEventListener('pointerup', (e) => {
+  if (!cardDrag || e.pointerId !== cardDrag.id) return;
   const dx = cardDrag.dx;
-  cardDrag = null;
-  reviewCard.classList.remove('dragging');
+  const wasHorizontal = cardDrag.axis === 'x';
+  endCardDrag();
+
   const t = currentReviewTx();
-  if (dx > 100 && t) {
+  if (!wasHorizontal || !t) { resetCardPosition(); return; }
+
+  const limit = swipeThreshold();
+  if (dx > limit) {
+    // Nach rechts heisst „Vorschlag übernehmen“. Ist der Vorschlag nur der Platzhalter, gibt
+    // es nichts zu übernehmen – sonst verschwände die Buchung unzugeordnet aus der Prüfliste.
+    if (t.category === FALLBACK_CATEGORY) {
+      resetCardPosition();
+      showToast('Hier gibt es noch keinen Vorschlag — bitte eine Kategorie wählen.');
+      return;
+    }
     assignReviewCategory(t.category);
-  } else if (dx < -100) {
+  } else if (dx < -limit) {
     skipReviewCard();
   } else {
     resetCardPosition();
   }
 });
 
-// Bricht die Geste ab (z. B. eingehender Anruf), darf die Karte nicht schief hängen bleiben.
-reviewCard.addEventListener('pointercancel', () => {
-  if (!cardDrag) return;
-  cardDrag = null;
-  reviewCard.classList.remove('dragging');
-  resetCardPosition();
+// Bricht die Geste ab (eingehender Anruf, Systemgeste, verlorene Zeigererfassung),
+// darf die Karte nicht schief hängen bleiben.
+['pointercancel', 'lostpointercapture'].forEach(evt => {
+  reviewCard.addEventListener(evt, () => {
+    if (!cardDrag) return;
+    endCardDrag();
+    resetCardPosition();
+  });
 });
 
 const categorizationLogDialog = document.getElementById('categorizationLogDialog');
@@ -1060,7 +1238,7 @@ function renderCategorizationLog() {
       : `von ${escapeHtml(entry.fromCategory)} zu ${escapeHtml(entry.toCategory)}`;
     return `
       <div class="transaction-item">
-        <span class="tx-dot" style="background:${categoryColor(entry.toCategory)}"></span>
+        <span class="tx-dot" style="background:${categoryColor(entry.toCategory, entry.type)}"></span>
         <div class="tx-info">
           <span class="tx-desc">${escapeHtml(entry.description)}</span>
           <span class="tx-meta">${changeText} · ${formatLogTimestamp(entry.timestamp)}</span>
@@ -1195,6 +1373,22 @@ function buildMonthSheet(monthStr) {
     });
   }
 
+  // Saldo direkt aus dem Kontoauszug, dazu eine Kontrollzeile als echte Formel:
+  // Anfang + Einnahmen − Ausgaben − Übertragungen muss den Endsaldo ergeben.
+  const bal = monthBalance(monthStr);
+  const transferTotal = sumAmounts(monthTx.filter(isTransfer));
+  let saldoStartRow = -1, saldoEndRow = -1, kontrollRow = -1;
+  if (bal) {
+    aoa.push([]);
+    aoa.push(['LAUT KONTOAUSZUG']);
+    saldoStartRow = aoa.length;
+    aoa.push(['SALDO ANFANG MONAT', bal.start]);
+    saldoEndRow = aoa.length;
+    aoa.push(['SALDO ENDE MONAT', bal.end]);
+    kontrollRow = aoa.length;
+    aoa.push(['KONTROLLE (muss 0 sein)', 0]);
+  }
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 22 }, { wch: 15 }];
   ws['!merges'] = merges;
@@ -1212,6 +1406,17 @@ function buildMonthSheet(monthStr) {
   }
   setComputedCell(ws, einnahmenRow, 1, incomeSumFormula(monthStr), incomeTotal, CHF_FMT);
   setComputedCell(ws, differenzRow, 1, `B${einnahmenRow + 1}-B${ausgabenRow + 1}`, incomeTotal - expenseTotal, CHF_FMT);
+
+  if (bal) {
+    const transferFormula = `SUMIFS(Rohdaten!$F:$F,Rohdaten!$B:$B,"${monthStr}",Rohdaten!$C:$C,"Ausgabe",Rohdaten!$E:$E,"Konto Übertragung")`;
+    setComputedCell(ws, saldoStartRow, 1, null, bal.start, CHF_FMT);
+    setComputedCell(ws, saldoEndRow, 1, null, bal.end, CHF_FMT);
+    setComputedCell(
+      ws, kontrollRow, 1,
+      `B${saldoStartRow + 1}+B${einnahmenRow + 1}-B${ausgabenRow + 1}-${transferFormula}-B${saldoEndRow + 1}`,
+      round2(bal.start + incomeTotal - expenseTotal - transferTotal - bal.end), CHF_FMT
+    );
+  }
 
   return ws;
 }
@@ -1266,6 +1471,18 @@ function buildOverviewSheet(orderedMonths) {
       asideRowIdx.push(aoa.length);
       aoa.push([cat.name, ...cat.monthValues, cat.rowTotal, '']);
     });
+  }
+
+  // Saldo je Monat, sofern aus einem Kontoauszug bekannt.
+  const monthBals = orderedMonths.map(m => monthBalance(m));
+  let saldoStartRowIdx = -1, saldoEndRowIdx = -1;
+  if (monthBals.some(Boolean)) {
+    aoa.push([]);
+    aoa.push(['LAUT KONTOAUSZUG']);
+    saldoStartRowIdx = aoa.length;
+    aoa.push(['SALDO ANFANG MONAT', ...monthBals.map(b => (b ? b.start : '')), '', '']);
+    saldoEndRowIdx = aoa.length;
+    aoa.push(['SALDO ENDE MONAT', ...monthBals.map(b => (b ? b.end : '')), '', '']);
   }
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -1343,6 +1560,14 @@ function buildOverviewSheet(orderedMonths) {
     );
   });
 
+  // Saldo-Werte stammen von der Bank, nicht aus einer Rechnung – nur Zahlenformat setzen.
+  if (saldoStartRowIdx !== -1) {
+    monthBals.forEach((b, ci) => {
+      if (!b) return;
+      stampFormat(ws, [{ r: saldoStartRowIdx, c: 1 + ci }, { r: saldoEndRowIdx, c: 1 + ci }], CHF_FMT);
+    });
+  }
+
   return ws;
 }
 
@@ -1380,6 +1605,309 @@ async function exportYearlyExcel() {
   }
 }
 
+
+// ============================================================================
+// Analytics: Balkendiagramm über Woche, Monat oder Jahr
+// ----------------------------------------------------------------------------
+// Eine Messreihe (Ausgaben je Abschnitt) = eine Farbe, deshalb keine Legende;
+// der Titel sagt, was geplottet ist. Beschriftet wird sparsam: nur der höchste
+// Balken trägt seinen Wert, die Achse liefert den Rest. Jeder Wert ist zusätzlich
+// über die Tabellenansicht erreichbar, damit nichts nur im Tooltip hängt.
+// ============================================================================
+
+const RANGE_STORAGE_KEY = 'budget_range_mode';
+const CHART_BAR_MAX = 24;      // Balken nie den ganzen Platz füllen
+const CHART_PLOT_H = 168;      // Zeichenfläche ohne Achsenband
+
+let rangeMode = (() => {
+  try {
+    const saved = localStorage.getItem(RANGE_STORAGE_KEY);
+    return ['week', 'month', 'year'].includes(saved) ? saved : 'month';
+  } catch { return 'month'; }
+})();
+
+// Ankertag des Zeitraums. Woche verschiebt sich tageweise, Monat/Jahr folgen currentMonth.
+let rangeAnchor = null;
+
+function anchorDate() {
+  if (rangeAnchor) return new Date(rangeAnchor);
+  const today = new Date();
+  if (monthStrOf(today) === currentMonth) return today;
+  const [y, m] = currentMonth.split('-').map(Number);
+  return new Date(y, m - 1, 1);
+}
+
+function startOfWeek(date) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const shift = (d.getDay() + 6) % 7; // Montag = 0
+  d.setDate(d.getDate() - shift);
+  return d;
+}
+
+const WEEKDAY_SHORT = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+
+// Baut die Abschnitte des gewählten Zeitraums: { key, label, from, to }
+function buildRangeBuckets() {
+  const buckets = [];
+  if (rangeMode === 'week') {
+    const start = startOfWeek(anchorDate());
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const iso = localIsoDate(d);
+      buckets.push({ key: iso, label: WEEKDAY_SHORT[i], sub: `${d.getDate()}.${d.getMonth() + 1}.`, from: iso, to: iso });
+    }
+    return buckets;
+  }
+
+  if (rangeMode === 'month') {
+    const [y, m] = currentMonth.split('-').map(Number);
+    const days = new Date(y, m, 0).getDate();
+    // Wochenbänder wie im Kontoauszug: 1–7, 8–14, 15–21, 22–28, Rest
+    for (let start = 1; start <= days; start += 7) {
+      const end = Math.min(start + 6, days);
+      buckets.push({
+        key: `${currentMonth}-${String(start).padStart(2, '0')}`,
+        label: `${start}–${end}`,
+        from: `${currentMonth}-${String(start).padStart(2, '0')}`,
+        to: `${currentMonth}-${String(end).padStart(2, '0')}`,
+      });
+    }
+    return buckets;
+  }
+
+  const year = currentMonth.slice(0, 4);
+  for (let m = 1; m <= 12; m++) {
+    const mm = String(m).padStart(2, '0');
+    const last = new Date(Number(year), m, 0).getDate();
+    buckets.push({
+      key: `${year}-${mm}`,
+      label: new Date(Number(year), m - 1, 1).toLocaleDateString(LOCALE, { month: 'short' }).replace('.', ''),
+      from: `${year}-${mm}-01`,
+      to: `${year}-${mm}-${String(last).padStart(2, '0')}`,
+    });
+  }
+  return buckets;
+}
+
+function rangeBounds(buckets) {
+  return { from: buckets[0].from, to: buckets[buckets.length - 1].to };
+}
+
+function transactionsInRange(bounds) {
+  return transactions.filter(t => t.date >= bounds.from && t.date <= bounds.to);
+}
+
+function rangePeriodLabel(buckets) {
+  if (rangeMode === 'week') {
+    const a = new Date(buckets[0].from + 'T12:00:00');
+    const b = new Date(buckets[6].to + 'T12:00:00');
+    const sameMonth = a.getMonth() === b.getMonth();
+    const left = `${a.getDate()}.${sameMonth ? '' : ' ' + a.toLocaleDateString(LOCALE, { month: 'short' })}`;
+    return `${left} – ${b.getDate()}. ${b.toLocaleDateString(LOCALE, { month: 'long', year: 'numeric' })}`;
+  }
+  if (rangeMode === 'month') return formatMonthLabel(currentMonth);
+  return currentMonth.slice(0, 4);
+}
+
+function shiftRange(delta) {
+  if (rangeMode === 'week') {
+    const d = startOfWeek(anchorDate());
+    d.setDate(d.getDate() + delta * 7);
+    rangeAnchor = d.getTime();
+    // Den Monat mitziehen, damit Kopfzeile und Zahlen zusammenpassen.
+    currentMonth = monthStrOf(d);
+  } else if (rangeMode === 'month') {
+    currentMonth = shiftMonth(currentMonth, delta);
+    rangeAnchor = null;
+  } else {
+    const [y, m] = currentMonth.split('-').map(Number);
+    currentMonth = `${y + delta}-${String(m).padStart(2, '0')}`;
+    rangeAnchor = null;
+  }
+  render();
+}
+
+function niceCeil(value) {
+  if (value <= 0) return 10;
+  const mag = Math.pow(10, Math.floor(Math.log10(value)));
+  const steps = [1, 2, 2.5, 5, 10];
+  for (const s of steps) {
+    if (value <= s * mag) return s * mag;
+  }
+  return 10 * mag;
+}
+
+function renderRangeChart() {
+  const buckets = buildRangeBuckets();
+  const bounds = rangeBounds(buckets);
+  const inRange = transactionsInRange(bounds);
+
+  const spendingRows = inRange.filter(countsAsSpending);
+  const values = buckets.map(b => sumAmounts(
+    spendingRows.filter(t => t.date >= b.from && t.date <= b.to)
+  ));
+  const total = values.reduce((s, v) => s + v, 0);
+  const income = sumAmounts(inRange.filter(isIncome));
+
+  // Durchschnitt nur über Abschnitte, die es schon gibt (kein Dezember im September).
+  const todayIso = localIsoDate(new Date());
+  const elapsed = buckets.filter(b => b.from <= todayIso);
+  const elapsedValues = values.slice(0, Math.max(elapsed.length, 1));
+  const average = elapsedValues.length ? elapsedValues.reduce((s, v) => s + v, 0) / elapsedValues.length : 0;
+
+  document.getElementById('chartPeriodLabel').textContent = rangePeriodLabel(buckets);
+  document.getElementById('chartTotal').textContent = formatCurrency(total);
+  document.getElementById('chartSub').textContent = income > 0
+    ? `Ausgaben · Gutschriften + ${formatCurrency(income)}`
+    : 'Ausgaben';
+
+  const maxValue = Math.max(...values, 0);
+  const scaleTop = niceCeil(Math.max(maxValue, average)) || 10;
+  const maxIdx = values.indexOf(maxValue);
+
+  const bars = buckets.map((b, i) => {
+    const v = values[i];
+    const h = scaleTop > 0 ? (v / scaleTop) * CHART_PLOT_H : 0;
+    const isMax = i === maxIdx && v > 0;
+    const isCurrent = todayIso >= b.from && todayIso <= b.to;
+    const cls = ['chart-bar'];
+    if (isCurrent) cls.push('is-current');
+    if (v === 0) cls.push('is-empty');
+    return `
+      <button type="button" class="chart-col" data-bucket="${escapeAttr(b.key)}" style="--i:${i}"
+              aria-label="${escapeAttr(b.label)}: ${formatCurrency(v)}">
+        <span class="chart-col-plot">
+          ${isMax ? `<span class="chart-bar-value">${formatCurrency(v)}</span>` : ''}
+          <span class="${cls.join(' ')}" style="height:${Math.max(h, v > 0 ? 3 : 2)}px"></span>
+        </span>
+        <span class="chart-col-label">${escapeHtml(b.label)}</span>
+      </button>`;
+  }).join('');
+
+  const avgPct = scaleTop > 0 ? (average / scaleTop) * 100 : 0;
+  document.getElementById('chartBody').innerHTML = `
+    <div class="chart-plot" style="--plot-h:${CHART_PLOT_H}px; --bar-max:${CHART_BAR_MAX}px">
+      <div class="chart-grid" aria-hidden="true">
+        <span class="chart-grid-line is-top" style="bottom:100%"><i>${formatCurrency(scaleTop)}</i></span>
+        <span class="chart-grid-line" style="bottom:50%"></span>
+        <span class="chart-grid-line is-base" style="bottom:0"><i>CHF 0</i></span>
+        ${average > 0 ? `<span class="chart-average" style="bottom:${avgPct}%"><i>Ø ${formatCurrency(average)}</i></span>` : ''}
+      </div>
+      <div class="chart-cols">${bars}</div>
+    </div>`;
+
+  document.getElementById('chartNote').textContent = average > 0
+    ? `Ø ${formatCurrency(average)} pro ${rangeMode === 'year' ? 'Monat' : rangeMode === 'month' ? 'Woche' : 'Tag'}`
+    : 'Noch keine Ausgaben in diesem Zeitraum.';
+
+  renderChartTable(buckets, values, total);
+  renderRangeCategories(inRange);
+}
+
+function renderChartTable(buckets, values, total) {
+  const wrap = document.getElementById('chartTableWrap');
+  wrap.innerHTML = `
+    <table class="chart-table">
+      <caption>Alle Werte des Zeitraums</caption>
+      <thead><tr><th scope="col">Abschnitt</th><th scope="col">Ausgaben</th></tr></thead>
+      <tbody>
+        ${buckets.map((b, i) => `<tr><th scope="row">${escapeHtml(b.label)}${b.sub ? ' ' + escapeHtml(b.sub) : ''}</th><td>${formatCurrency(values[i])}</td></tr>`).join('')}
+      </tbody>
+      <tfoot><tr><th scope="row">Total</th><td>${formatCurrency(total)}</td></tr></tfoot>
+    </table>`;
+}
+
+// Kategorien des Zeitraums: gerankte Balken, jede Zeile direkt beschriftet.
+function renderRangeCategories(inRange) {
+  const byCategory = {};
+  const counts = {};
+  inRange.filter(countsAsSpending).forEach(t => {
+    byCategory[t.category] = (byCategory[t.category] || 0) + t.amount;
+    counts[t.category] = (counts[t.category] || 0) + 1;
+  });
+  const entries = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((s, [, v]) => s + v, 0);
+
+  const listEl = document.getElementById('rangeCategoryList');
+  document.getElementById('rangeCategoryEmpty').hidden = entries.length > 0;
+  const max = entries.length ? entries[0][1] : 0;
+
+  listEl.innerHTML = entries.map(([name, amount], i) => {
+    const pct = total > 0 ? Math.round((amount / total) * 100) : 0;
+    return `
+      <button type="button" class="category-row" style="--i:${i}" data-category="${escapeAttr(name)}"
+              aria-label="${escapeAttr(name)}: ${formatCurrency(amount)}, ${pct} Prozent, Ausgaben anzeigen">
+        <div class="category-row-top">
+          <span>${escapeHtml(name)}</span>
+          <span>${formatCurrency(amount)}</span>
+        </div>
+        <div class="category-bar-track">
+          ${barMarkup('category-bar-fill', max ? (amount / max) * 100 : 0, categoryColor(name, TX_EXPENSE))}
+        </div>
+        <span class="category-row-count">${pct}% · ${plural(counts[name] || 0, 'Eintrag', 'Einträge')}</span>
+      </button>`;
+  }).join('');
+}
+
+function updateSegmentIndicator() {
+  const bar = document.getElementById('rangeSegmented');
+  const active = bar.querySelector('.segment[aria-selected="true"]');
+  const indicator = document.getElementById('segmentIndicator');
+  if (!active) return;
+  indicator.style.width = `${active.offsetWidth}px`;
+  indicator.style.transform = `translateX(${active.offsetLeft}px)`;
+}
+
+function setRangeMode(mode) {
+  rangeMode = mode;
+  rangeAnchor = null;
+  try { localStorage.setItem(RANGE_STORAGE_KEY, mode); } catch {}
+  document.querySelectorAll('#rangeSegmented .segment').forEach(btn => {
+    btn.setAttribute('aria-selected', String(btn.dataset.range === mode));
+  });
+  render();
+  updateSegmentIndicator();
+}
+
+document.getElementById('rangeSegmented').addEventListener('click', (e) => {
+  const btn = e.target.closest('.segment');
+  if (!btn) return;
+  setRangeMode(btn.dataset.range);
+});
+
+document.getElementById('rangePrev').addEventListener('click', () => shiftRange(-1));
+document.getElementById('rangeNext').addEventListener('click', () => shiftRange(1));
+
+// Balken antippen → in diesen Abschnitt hineinzoomen.
+document.getElementById('chartBody').addEventListener('click', (e) => {
+  const col = e.target.closest('.chart-col');
+  if (!col) return;
+  const key = col.dataset.bucket;
+  if (rangeMode === 'year') {
+    currentMonth = key;
+    setRangeMode('month');
+  } else if (rangeMode === 'month') {
+    rangeAnchor = new Date(key + 'T12:00:00').getTime();
+    setRangeMode('week');
+  }
+});
+
+document.getElementById('rangeCategoryList').addEventListener('click', (e) => {
+  const row = e.target.closest('.category-row');
+  if (!row || !row.dataset.category) return;
+  setCategoryFilter(row.dataset.category);
+});
+
+const chartTableToggle = document.getElementById('chartTableToggle');
+chartTableToggle.addEventListener('click', () => {
+  const wrap = document.getElementById('chartTableWrap');
+  const open = wrap.hidden;
+  wrap.hidden = !open;
+  chartTableToggle.setAttribute('aria-expanded', String(open));
+  chartTableToggle.textContent = open ? 'Tabelle ausblenden' : 'Als Tabelle';
+});
+
+window.addEventListener('resize', updateSegmentIndicator);
 document.getElementById('exportExcelBtn').addEventListener('click', exportYearlyExcel);
 
 document.getElementById('historyList').addEventListener('click', (e) => {
@@ -1387,6 +1915,26 @@ document.getElementById('historyList').addEventListener('click', (e) => {
   if (!btn) return;
   currentMonth = btn.dataset.month;
   setActiveTab('panel-overview');
+  render();
+});
+
+// Kategorie antippen → Ausgaben dieser Kategorie zeigen.
+document.getElementById('categoryList').addEventListener('click', (e) => {
+  const row = e.target.closest('.category-row');
+  if (!row || !row.dataset.category) return;
+  setCategoryFilter(row.dataset.category);
+});
+
+document.getElementById('categoryFilterClear').addEventListener('click', () => {
+  categoryFilter = null;
+  render();
+});
+
+const categorySortSelect = document.getElementById('categorySort');
+categorySortSelect.value = categorySort;
+categorySortSelect.addEventListener('change', () => {
+  categorySort = categorySortSelect.value;
+  try { localStorage.setItem(CATEGORY_SORT_KEY, categorySort); } catch {}
   render();
 });
 
@@ -1636,15 +2184,24 @@ function parseAmount(value) {
   return null;
 }
 
-const DATE_KEYWORDS = ['datum', 'buchungsdatum', 'valuta', 'date', 'buchung'];
+// Reihenfolge = Vorrang. „buchungsdatum“ und „buchung“ stehen vor „valuta“, weil das
+// Buchungsdatum den Monat der Bank bestimmt und der Saldo in dieser Reihenfolge läuft.
+const DATE_KEYWORDS = ['buchungsdatum', 'buchung', 'datum', 'valuta', 'date'];
 const DESC_KEYWORDS = ['buchungstext', 'text', 'beschreibung', 'avisierungstext', 'zahlungszweck', 'description', 'details', 'bezeichnung', 'händler', 'haendler', 'name'];
 const AMOUNT_KEYWORDS = ['betrag', 'amount', 'belastung', 'debit', 'ausgabe', 'soll'];
 const CREDIT_KEYWORDS = ['gutschrift', 'credit', 'eingang', 'einnahme', 'haben'];
 const CATEGORY_HEADER_KEYWORDS = ['kategorie', 'category', 'rubrik', 'zuordnung'];
+const BALANCE_KEYWORDS = ['saldo', 'kontostand', 'balance', 'bestand'];
 const TYPE_HEADER_NAMES = ['typ', 'type', 'art', 'buchungsart'];
 
+// Erst exakte Spaltennamen, dann Teiltreffer. Sonst würde „buchung“ in „Buchungstext“
+// hängen bleiben und die Textspalte als Datum gelten.
 function findColumn(headers, keywords, exclude = []) {
-  const lower = headers.map(h => String(h || '').toLowerCase());
+  const lower = headers.map(h => String(h || '').toLowerCase().trim());
+  for (const kw of keywords) {
+    const idx = lower.findIndex((h, i) => !exclude.includes(i) && h === kw);
+    if (idx !== -1) return idx;
+  }
   for (const kw of keywords) {
     const idx = lower.findIndex((h, i) => !exclude.includes(i) && h.includes(kw));
     if (idx !== -1) return idx;
@@ -1658,12 +2215,15 @@ function findExactColumn(headers, names, exclude = []) {
 
 function analyzeHeaderRow(headers) {
   const dateIdx = findColumn(headers, DATE_KEYWORDS);
-  const amountIdx = findColumn(headers, AMOUNT_KEYWORDS, [dateIdx]);
-  const creditIdx = findColumn(headers, CREDIT_KEYWORDS, [dateIdx, amountIdx]);
-  const descIdx = findColumn(headers, DESC_KEYWORDS, [dateIdx, amountIdx, creditIdx]);
-  const categoryIdx = findColumn(headers, CATEGORY_HEADER_KEYWORDS, [dateIdx, amountIdx, creditIdx, descIdx]);
-  const typeIdx = findExactColumn(headers, TYPE_HEADER_NAMES, [dateIdx, amountIdx, creditIdx, descIdx, categoryIdx]);
-  return { dateIdx, amountIdx, creditIdx, descIdx, categoryIdx, typeIdx };
+  // Der Saldo wird vor dem Betrag gesucht: „Saldo CHF“ enthält kein Betrags-Stichwort,
+  // aber die Reihenfolge schützt davor, ihn später als Betragsspalte einzusammeln.
+  const balanceIdx = findColumn(headers, BALANCE_KEYWORDS, [dateIdx]);
+  const amountIdx = findColumn(headers, AMOUNT_KEYWORDS, [dateIdx, balanceIdx]);
+  const creditIdx = findColumn(headers, CREDIT_KEYWORDS, [dateIdx, balanceIdx, amountIdx]);
+  const descIdx = findColumn(headers, DESC_KEYWORDS, [dateIdx, balanceIdx, amountIdx, creditIdx]);
+  const categoryIdx = findColumn(headers, CATEGORY_HEADER_KEYWORDS, [dateIdx, balanceIdx, amountIdx, creditIdx, descIdx]);
+  const typeIdx = findExactColumn(headers, TYPE_HEADER_NAMES, [dateIdx, balanceIdx, amountIdx, creditIdx, descIdx, categoryIdx]);
+  return { dateIdx, balanceIdx, amountIdx, creditIdx, descIdx, categoryIdx, typeIdx };
 }
 
 // Sucht in den ersten Zeilen eines Blatts die Titelzeile und erkennt zwei Tabellenarten:
@@ -1754,13 +2314,16 @@ const CATEGORY_ALIASES = {
   'Cevi': ['cevi kosten'],
   'Konto Übertragung': ['uebertrag', 'uebertragung', 'transfer', 'umbuchung', 'konto'],
   'Noch auszuwählen': ['offen', 'unklar', 'unbekannt', 'rest', 'noch offen'],
-  [INCOME_CATEGORY]: ['einnahmen', 'gutschrift', 'lohn', 'salaer', 'income', 'einkommen'],
+  'Lohn': ['salaer', 'salär', 'gehalt', 'einkommen', 'income', 'bonus', 'einnahmen'],
+  'Spesen': ['speseneinnahmen', 'fixe speseneinnahmen', 'spesenausgaben'],
+  'Geld erhalten': ['gutschrift', 'erhalten'],
+  'Rückerstattung': ['rueckerstattung', 'rueckzahlung', 'refund'],
 };
 
 function mapFileCategory(raw) {
   const norm = normalizeCategoryName(raw);
   if (!norm) return null;
-  const all = [...CATEGORIES.map(c => c.name), INCOME_CATEGORY];
+  const all = [...CATEGORIES.map(c => c.name), ...INCOME_CATEGORIES.map(c => c.name)];
   const exact = all.find(name => normalizeCategoryName(name) === norm);
   if (exact) return exact;
   for (const [name, aliases] of Object.entries(CATEGORY_ALIASES)) {
@@ -1779,7 +2342,10 @@ function mapFileCategory(raw) {
 function resolveRowCategory(row) {
   const raw = row.fileCategoryRaw;
   if (raw) {
-    const mapped = mapFileCategory(raw);
+    // Eine Kategorie aus der Datei muss zum Typ der Zeile passen – „Lohn“ bei einer
+    // Belastung wäre keine gültige Wahl.
+    const mappedRaw = mapFileCategory(raw);
+    const mapped = (mappedRaw && isValidCategory(mappedRaw, row.type)) ? mappedRaw : null;
     if (mapped && mapped !== FALLBACK_CATEGORY) return { category: mapped, certain: true, reason: 'file', fromFile: true };
     const guess = guessCategory(row.description, row.amount, row.type);
     if (!mapped) return { ...guess, certain: false, reason: 'unknown_file_category', unknownName: raw };
@@ -1787,6 +2353,59 @@ function resolveRowCategory(row) {
     return { ...guess, reason: guess.reason === 'no_match' ? 'file_unassigned' : guess.reason };
   }
   return guessCategory(row.description, row.amount, row.type);
+}
+
+// ---- Saldo je Monat ----------------------------------------------------------
+// Die Saldo-Spalte der Bank zeigt den Kontostand NACH der jeweiligen Buchung, und sie
+// läuft in der Reihenfolge der Buchungsdaten. Daraus folgt:
+//   Endsaldo    = Saldo der chronologisch letzten Buchung des Monats
+//   Anfangssaldo = Saldo der ersten Buchung MINUS deren eigener Wirkung
+// Der zweite Teil ist die Feinheit: Der Saldo der ersten Zeile ist nicht der Stand am
+// Monatsanfang, sondern der Stand danach – die Buchung muss zurückgerechnet werden.
+const BALANCES_STORAGE_KEY = 'budget_balances';
+
+let balances = loadBalances();
+
+function loadBalances() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BALANCES_STORAGE_KEY));
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch { return {}; }
+}
+
+function saveBalances() {
+  localStorage.setItem(BALANCES_STORAGE_KEY, JSON.stringify(balances));
+}
+
+function signedEffect(row) {
+  return row.type === TX_INCOME ? row.amount : -row.amount;
+}
+
+function computeMonthBalances(rows) {
+  const byMonth = new Map();
+  rows.forEach(r => {
+    if (typeof r.balance !== 'number' || !r.date) return;
+    const m = r.date.slice(0, 7);
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(r);
+  });
+
+  const result = {};
+  byMonth.forEach((list, month) => {
+    const sorted = list.slice().sort(compareChronological);
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    result[month] = {
+      start: round2(first.balance - signedEffect(first)),
+      end: round2(last.balance),
+      rows: sorted.length,
+    };
+  });
+  return result;
+}
+
+function monthBalance(monthStr) {
+  return balances[monthStr] || null;
 }
 
 const IMPORT_LOG_STORAGE_KEY = 'budget_import_log';
@@ -1819,6 +2438,7 @@ const mapDesc = document.getElementById('mapDesc');
 const mapAmount = document.getElementById('mapAmount');
 const mapCredit = document.getElementById('mapCredit');
 const mapCategory = document.getElementById('mapCategory');
+const mapBalance = document.getElementById('mapBalance');
 const mapSign = document.getElementById('mapSign');
 const mapSignLabel = document.getElementById('mapSignLabel');
 
@@ -1858,6 +2478,7 @@ function populateMappingSelects(table) {
   fillHeaderSelect(mapAmount, table.headers, table.amountIdx, false);
   fillHeaderSelect(mapCredit, table.headers, table.creditIdx, true);
   fillHeaderSelect(mapCategory, table.headers, table.categoryIdx, true);
+  fillHeaderSelect(mapBalance, table.headers, table.balanceIdx ?? -1, true);
   updateSignSuggestion();
 }
 
@@ -1868,6 +2489,7 @@ function currentMapping() {
     amountIdx: Number(mapAmount.value),
     creditIdx: Number(mapCredit.value),
     categoryIdx: Number(mapCategory.value),
+    balanceIdx: Number(mapBalance.value),
     sign: mapSign.value,
   };
 }
@@ -1888,6 +2510,7 @@ function mappingForTable(table, primary, mapping) {
     amountIdx: byHeader(mapping.amountIdx, table.amountIdx),
     creditIdx: byHeader(mapping.creditIdx, table.creditIdx),
     categoryIdx: byHeader(mapping.categoryIdx, table.categoryIdx),
+    balanceIdx: byHeader(mapping.balanceIdx, table.balanceIdx ?? -1),
     typeIdx: table.typeIdx,
     sign: mapping.sign,
   };
@@ -1927,8 +2550,14 @@ function buildRowsForDetailTable(table, m) {
     }
 
     const fileCategoryRaw = m.categoryIdx !== -1 ? String(row[m.categoryIdx] ?? '').trim() : '';
+    const balanceIdx = m.balanceIdx ?? -1;
+    const balance = balanceIdx !== -1 ? parseAmount(row[balanceIdx]) : null;
     const valid = !!(date && description && amount !== null && amount > 0 && type);
-    return { date, description, amount: valid ? round2(amount) : null, type, fileCategoryRaw, valid, fileIndex };
+    return {
+      date, description, amount: valid ? round2(amount) : null, type, fileCategoryRaw,
+      balance: typeof balance === 'number' ? round2(balance) : null,
+      valid, fileIndex,
+    };
   });
 
   // Bankexporte listen meist das Neueste zuoberst → dann rückwärts durchnummerieren,
@@ -2043,7 +2672,7 @@ function renderImportPreview() {
   });
 }
 
-[mapDate, mapDesc, mapCategory, mapSign].forEach(select => {
+[mapDate, mapDesc, mapCategory, mapBalance, mapSign].forEach(select => {
   select.addEventListener('change', renderImportPreview);
 });
 [mapAmount, mapCredit].forEach(select => {
@@ -2218,6 +2847,16 @@ document.getElementById('importConfirmBtn').addEventListener('click', () => {
   savePatterns();
   saveTransactions();
 
+  // Saldo aus der Datei je Monat festhalten. Ein Monat wird nur überschrieben, wenn die
+  // Datei ihn auch abdeckt – ein Teil-Import soll einen guten Wert nicht kaputtmachen.
+  const computed = computeMonthBalances(rows);
+  let balanceMonths = 0;
+  Object.entries(computed).forEach(([month, b]) => {
+    balances[month] = { ...b, filename: currentImportFileName, importedAt: Date.now() };
+    balanceMonths++;
+  });
+  if (balanceMonths) saveBalances();
+
   if (currentImportFileName) {
     const monthsTouched = new Set(rows.map(r => r.date.slice(0, 7)));
     monthsTouched.forEach(m => {
@@ -2230,7 +2869,8 @@ document.getElementById('importConfirmBtn').addEventListener('click', () => {
   if (rows.length) currentMonth = rows[rows.length - 1].date.slice(0, 7);
   render();
   renderPatternsList();
-  showToast(`${plural(added, 'Eintrag', 'Einträge')} importiert, ${skipped} bereits vorhanden.`);
+  showToast(`${plural(added, 'Eintrag', 'Einträge')} importiert, ${skipped} bereits vorhanden.`
+    + (balanceMonths ? ` Saldo für ${plural(balanceMonths, 'Monat', 'Monate')} übernommen.` : ''));
   if (newUncertainIds.length) openReviewDialog(newUncertainIds);
 });
 
@@ -3175,6 +3815,7 @@ function exportBackup() {
     goals,
     learnedRules,
     patterns,
+    balances,
     importLog,
     teachChatHistory,
     categorizationLog,
@@ -3215,6 +3856,7 @@ function importBackup(file) {
     goals = data.goals && typeof data.goals === 'object' ? data.goals : { overall: null, categories: {} };
     learnedRules = data.learnedRules && typeof data.learnedRules === 'object' ? data.learnedRules : {};
     patterns = data.patterns && typeof data.patterns === 'object' ? data.patterns : {};
+    balances = data.balances && typeof data.balances === 'object' ? data.balances : {};
     importLog = data.importLog && typeof data.importLog === 'object' ? data.importLog : {};
     teachChatHistory = Array.isArray(data.teachChatHistory) ? data.teachChatHistory : [];
     categorizationLog = Array.isArray(data.categorizationLog) ? data.categorizationLog : [];
@@ -3223,6 +3865,7 @@ function importBackup(file) {
     saveGoals();
     saveLearnedRules();
     savePatterns();
+    saveBalances();
     saveImportLog();
     saveTeachChat();
     saveCategorizationLog();
@@ -3293,6 +3936,10 @@ function setActiveTab(panelId, options = {}) {
   });
   try { localStorage.setItem(TAB_STORAGE_KEY, panelId); } catch {}
 
+  // Die Segment-Markierung wird aus Pixelbreiten berechnet. Solange der Reiter versteckt
+  // ist, sind die alle 0 – also erst nachmessen, wenn er tatsächlich sichtbar ist.
+  if (panelId === 'panel-history') updateSegmentIndicator();
+
   // Der Inhalt fährt beim Wechsel sanft ein; die Klasse entfernt sich danach selbst.
   if (panel && changed && options.animate !== false) {
     panel.classList.remove('is-entering');
@@ -3346,7 +3993,13 @@ document.getElementById('welcomeImportBtn').addEventListener('click', () => {
 const startTab = loadActiveTab();
 setActiveTab(startTab, { animate: false });
 
+// Segment-Knöpfe auf den gespeicherten Zeitraum stellen, bevor gezeichnet wird.
+document.querySelectorAll('#rangeSegmented .segment').forEach(btn => {
+  btn.setAttribute('aria-selected', String(btn.dataset.range === rangeMode));
+});
+
 render();
+updateSegmentIndicator();
 
 // Auch der zuerst sichtbare Reiter fährt einmal sanft ein.
 const startPanel = document.getElementById(startTab);
