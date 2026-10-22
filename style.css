@@ -2080,3 +2080,26 @@ button.category-row:hover { background: var(--surface-sunken); }
 @media (max-width: 600px) {
   .teach-suggestion { min-height: 40px; }
 }
+
+/* ---------- Achsenstreifen ----------
+   Die Balken lassen rechts einen Streifen frei, in dem die Achsenbeschriftung steht.
+   Ohne ihn lag „Ø …“ und „0“ hinter einem hohen letzten Balken. Die Breite folgt der
+   längsten Beschriftung (--axis-chars aus app.js), Ziffern sind gleich breit. */
+.chart-cols { margin-right: calc(var(--axis-chars, 4) * .43rem + .55rem); }
+
+.chart-grid-line i,
+.chart-average i {
+  line-height: 1.15;
+  padding: 0 0 0 .3rem;
+}
+
+/* Höchstwert am Rand: an der Kante ausrichten statt über die Karte hinausragen. */
+.chart-bar-value.is-start { left: 0; }
+.chart-bar-value.is-end { right: 0; }
+
+/* Jahresansicht auf sehr schmalen Telefonen: Monatsname nur als Anfangsbuchstabe. */
+.chart-col-label .lbl-short { display: none; }
+@media (max-width: 350px) {
+  .chart-col-label .lbl-long { display: none; }
+  .chart-col-label .lbl-short { display: inline; }
+}

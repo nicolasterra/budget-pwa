@@ -1750,9 +1750,12 @@ function buildRangeBuckets() {
   for (let m = 1; m <= 12; m++) {
     const mm = String(m).padStart(2, '0');
     const last = new Date(Number(year), m, 0).getDate();
+    const monthShort = new Date(Number(year), m - 1, 1).toLocaleDateString(LOCALE, { month: 'short' }).replace('.', '');
     buckets.push({
       key: `${year}-${mm}`,
-      label: new Date(Number(year), m - 1, 1).toLocaleDateString(LOCALE, { month: 'short' }).replace('.', ''),
+      label: monthShort,
+      // Auf sehr schmalen Telefonen passt „Mär“ nicht mehr in die Spalte – dann nur der Anfangsbuchstabe.
+      short: monthShort.charAt(0),
       from: `${year}-${mm}-01`,
       to: `${year}-${mm}-${String(last).padStart(2, '0')}`,
     });
@@ -1799,6 +1802,14 @@ function shiftRange(delta) {
     rangeAnchor = null;
   }
   render();
+}
+
+// Mindestabstand in Pixeln, damit zwei Achsenbeschriftungen sich nicht überdecken.
+const AXIS_LABEL_CLEARANCE = 17;
+
+// Achsenwerte knapp: ohne Währung (die steht in der Überschrift), ab 100 ohne Rappen.
+function formatAxisValue(v) {
+  return v.toLocaleString(LOCALE, { maximumFractionDigits: v >= 100 ? 0 : 2 });
 }
 
 function niceCeil(value) {
@@ -1852,21 +1863,36 @@ function renderRangeChart() {
       <button type="button" class="chart-col" data-bucket="${escapeAttr(b.key)}" style="--i:${i}"
               aria-label="${escapeAttr(b.label)}: ${formatCurrency(v)}">
         <span class="chart-col-plot">
-          ${isMax ? `<span class="chart-bar-value">${formatCurrency(v)}</span>` : ''}
+          ${isMax ? `<span class="chart-bar-value${i === 0 ? ' is-start' : (i === buckets.length - 1 ? ' is-end' : '')}">${formatCurrency(v)}</span>` : ''}
           <span class="${cls.join(' ')}" style="height:${Math.max(h, v > 0 ? 3 : 2)}px"></span>
         </span>
-        <span class="chart-col-label">${escapeHtml(b.label)}</span>
+        <span class="chart-col-label">${b.short
+          ? `<span class="lbl-long">${escapeHtml(b.label)}</span><span class="lbl-short" aria-hidden="true">${escapeHtml(b.short)}</span>`
+          : escapeHtml(b.label)}</span>
       </button>`;
   }).join('');
 
   const avgPct = scaleTop > 0 ? (average / scaleTop) * 100 : 0;
+  const avgPx = (avgPct / 100) * CHART_PLOT_H;
+
+  // Achsenbeschriftung sitzt in einem eigenen Streifen rechts der Balken. Vorher lag sie
+  // rechtsbündig über der Zeichenfläche und verschwand hinter einem hohen letzten Balken.
+  const topLabel = formatAxisValue(scaleTop);
+  const avgLabel = average > 0 ? `Ø ${formatAxisValue(average)}` : '';
+  const axisChars = Math.max(topLabel.length, avgLabel.length, 1);
+
+  // Liegt der Durchschnitt nah an Ober- oder Grundlinie, überlappen sich die Beschriftungen.
+  // Der Durchschnitt hat dann Vorrang – er ist die Zahl mit Aussage.
+  const showTopLabel = !(average > 0 && avgPx > CHART_PLOT_H - AXIS_LABEL_CLEARANCE * 2);
+  const showBaseLabel = !(average > 0 && avgPx < AXIS_LABEL_CLEARANCE);
+
   document.getElementById('chartBody').innerHTML = `
-    <div class="chart-plot" style="--plot-h:${CHART_PLOT_H}px; --bar-max:${CHART_BAR_MAX}px">
+    <div class="chart-plot" style="--plot-h:${CHART_PLOT_H}px; --bar-max:${CHART_BAR_MAX}px; --axis-chars:${axisChars}">
       <div class="chart-grid" aria-hidden="true">
-        <span class="chart-grid-line is-top" style="bottom:100%"><i>${formatCurrency(scaleTop)}</i></span>
+        <span class="chart-grid-line is-top" style="bottom:100%">${showTopLabel ? `<i>${topLabel}</i>` : ''}</span>
         <span class="chart-grid-line" style="bottom:50%"></span>
-        <span class="chart-grid-line is-base" style="bottom:0"><i>CHF 0</i></span>
-        ${average > 0 ? `<span class="chart-average" style="bottom:${avgPct}%"><i>Ø ${formatCurrency(average)}</i></span>` : ''}
+        <span class="chart-grid-line is-base" style="bottom:0">${showBaseLabel ? '<i>0</i>' : ''}</span>
+        ${average > 0 ? `<span class="chart-average" style="bottom:${avgPct}%"><i>${avgLabel}</i></span>` : ''}
       </div>
       <div class="chart-cols">${bars}</div>
     </div>`;
