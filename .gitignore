@@ -1,0 +1,4 @@
+# Lokale Tests mit echten Kontodaten - nie veroeffentlichen
+.local-tests/
+# Test-Hilfsdateien
+__*

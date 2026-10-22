@@ -23,21 +23,39 @@ const CATEGORIES = [
 
 const FALLBACK_CATEGORY = 'Noch auszuwählen';
 
-// Einnahmen haben ihre eigene Liste – „Lohn“ oder „Spesen“ wären als Ausgabe sinnlos.
+// Einnahmen: „Lohn“ plus alle Ausgaben-Kategorien. Lohn gibt es nur hier – als Ausgabe
+// wäre er sinnlos. Olivgrün, weil das frühere Grün kaum von „Ferien“ zu unterscheiden war.
 const INCOME_CATEGORIES = [
-  { name: 'Lohn', color: '#2f7d5d' },
-  { name: 'Spesen', color: '#4e79a7' },
-  { name: 'Cevi', color: '#0b8ea6' },
-  { name: 'Geld erhalten', color: '#58938c' },
-  { name: 'Rückerstattung', color: '#9c755f' },
-  { name: 'Geschenk', color: '#d37295' },
-  { name: 'Konto Übertragung', color: '#8891a3' },
-  { name: 'Noch auszuwählen', color: '#ef4444' },
+  { name: 'Lohn', color: '#6f7f14' },
+  ...CATEGORIES,
 ];
 
 // Vor der Einführung der Einnahme-Kategorien bekamen alle Gutschriften diese eine.
 const LEGACY_INCOME_CATEGORY = 'Einnahme';
-const LEGACY_CATEGORY_COLORS = { [LEGACY_INCOME_CATEGORY]: '#2f7d5d' };
+const LEGACY_CATEGORY_COLORS = { [LEGACY_INCOME_CATEGORY]: '#6f7f14' };
+
+// Die erste eigene Einnahme-Liste wurde wieder abgeschafft. Wohin ihre Kategorien wandern;
+// null = kein Gegenstück, die Buchung kommt zur Neuzuordnung in die Prüfliste.
+const RETIRED_INCOME_CATEGORIES = {
+  'Geschenk': 'Geschenke',
+  'Spesen': null,
+  'Geld erhalten': null,
+  'Rückerstattung': null,
+};
+
+// Regeln und Muster speichern nur einen Kategorienamen. Abgeschaffte Namen umbiegen oder
+// entfernen, sonst stünden tote Regeln in der Liste des Assistenten.
+function dropRetiredCategories(store) {
+  if (!store || typeof store !== 'object') return {};
+  Object.keys(store).forEach(key => {
+    const entry = store[key];
+    if (!entry || !(entry.category in RETIRED_INCOME_CATEGORIES)) return;
+    const replacement = RETIRED_INCOME_CATEGORIES[entry.category];
+    if (replacement) entry.category = replacement;
+    else delete store[key];
+  });
+  return store;
+}
 
 const TX_EXPENSE = 'expense';
 const TX_INCOME = 'income';
@@ -77,10 +95,7 @@ const CATEGORY_KEYWORDS = {
 const INCOME_KEYWORDS = {
   'Lohn': ['lohn', 'salär', 'salaer', 'gehalt', 'eth zürich', 'eth zurich'],
   'Cevi': ['cevi', 'jungschar', 'kirche'],
-  'Rückerstattung': ['rückgutschrift', 'rueckgutschrift', 'rückzahlung', 'rueckzahlung', 'rückerstattung'],
   'Konto Übertragung': ['übertrag', 'uebertrag'],
-  'Geld erhalten': ['twint-gutschrift', 'geld erhalten'],
-  'Spesen': ['spesen'],
 };
 
 function categoryListFor(type) {
@@ -102,7 +117,7 @@ const RULES_STORAGE_KEY = 'budget_learned_rules';
 let learnedRules = loadLearnedRules();
 
 function loadLearnedRules() {
-  try { return JSON.parse(localStorage.getItem(RULES_STORAGE_KEY)) || {}; }
+  try { return dropRetiredCategories(JSON.parse(localStorage.getItem(RULES_STORAGE_KEY)) || {}); }
   catch { return {}; }
 }
 
@@ -157,7 +172,7 @@ const PATTERN_PROBATION_COUNT = 3;
 let patterns = loadPatterns();
 
 function loadPatterns() {
-  try { return JSON.parse(localStorage.getItem(PATTERNS_STORAGE_KEY)) || {}; }
+  try { return dropRetiredCategories(JSON.parse(localStorage.getItem(PATTERNS_STORAGE_KEY)) || {}); }
   catch { return {}; }
 }
 
@@ -304,6 +319,7 @@ const REVIEW_REASON_TEXT = {
   unknown_file_category: 'Kategorie aus Datei unbekannt',
   file_unassigned: 'in der Datei nicht zugeordnet',
   income_recategorize: 'Gutschriften bekommen jetzt eigene Kategorien',
+  income_list_changed: 'Einnahme-Kategorien wurden angepasst — bitte neu zuordnen',
 };
 
 function reviewReasonText(t) {
@@ -346,6 +362,17 @@ function migrateTransactions(list) {
       t.category = FALLBACK_CATEGORY;
       t.uncertain = true;
       t.reason = 'income_recategorize';
+    }
+    // Kategorien der ersten Einnahme-Liste: mit Gegenstück umbenennen, sonst neu zuordnen lassen.
+    if (t.type === TX_INCOME && t.category in RETIRED_INCOME_CATEGORIES) {
+      const replacement = RETIRED_INCOME_CATEGORIES[t.category];
+      if (replacement) {
+        t.category = replacement;
+      } else {
+        t.category = FALLBACK_CATEGORY;
+        t.uncertain = true;
+        t.reason = 'income_list_changed';
+      }
     }
   });
   return list;
@@ -615,8 +642,12 @@ function filterBounds() {
 function filteredTransactions() {
   const b = filterBounds();
   if (!b) return null;
+  // Gutschriften und Ausgaben teilen sich die Kategorienamen. Wer im Dashboard auf
+  // „Verpflegung“ tippt, meint die Ausgaben – sonst stimmte die Summe nicht mit dem Balken überein.
+  const type = categoryFilter.type;
   return transactions
-    .filter(t => t.category === categoryFilter.name && t.date >= b.from && t.date <= b.to)
+    .filter(t => t.category === categoryFilter.name && t.date >= b.from && t.date <= b.to
+      && (!type || t.type === type))
     .sort(compareChronological);
 }
 
@@ -625,20 +656,24 @@ function renderCategoryFilterChip(list) {
   if (!categoryFilter || !list) { wrap.hidden = true; return; }
   const b = filterBounds();
   wrap.hidden = false;
+  const typeLabel = categoryFilter.type === TX_INCOME ? ' · Einnahmen'
+    : categoryFilter.type === TX_EXPENSE ? ' · Ausgaben' : '';
   document.getElementById('categoryFilterName').textContent = categoryFilter.name;
-  document.getElementById('categoryFilterPeriod').textContent = b.label;
+  document.getElementById('categoryFilterPeriod').textContent = b.label + typeLabel;
   // Summe der Kategorie im Zeitraum – sonst muesste man die Zeilen selbst zusammenrechnen.
   document.getElementById('categoryFilterCount').textContent =
     `${plural(list.length, 'Eintrag', 'Einträge')} · ${formatCurrency(sumAmounts(list))}`;
   document.getElementById('categoryFilterDot').style.background =
-    categoryColor(categoryFilter.name, list.length && isIncome(list[0]) ? TX_INCOME : TX_EXPENSE);
+    categoryColor(categoryFilter.name, categoryFilter.type || TX_EXPENSE);
 }
 
 // range (optional) = { from, to, label } aus Analytics; ohne ihn gilt der gewählte Monat.
-function setCategoryFilter(name, range) {
+// type (optional) = nur Ausgaben oder nur Einnahmen dieser Kategorie.
+function setCategoryFilter(name, range, type) {
   categoryFilter = range
     ? { name, scope: 'range', from: range.from, to: range.to, label: range.label }
     : { name, scope: 'month' };
+  categoryFilter.type = type || null;
   setActiveTab('panel-transactions');
   render();
 }
@@ -1937,7 +1972,7 @@ document.getElementById('chartBody').addEventListener('click', (e) => {
 document.getElementById('rangeCategoryList').addEventListener('click', (e) => {
   const row = e.target.closest('.category-row');
   if (!row || !row.dataset.category) return;
-  setCategoryFilter(row.dataset.category, lastRangeInfo);
+  setCategoryFilter(row.dataset.category, lastRangeInfo, TX_EXPENSE);
 });
 
 const chartTableToggle = document.getElementById('chartTableToggle');
@@ -1964,7 +1999,7 @@ document.getElementById('historyList').addEventListener('click', (e) => {
 document.getElementById('categoryList').addEventListener('click', (e) => {
   const row = e.target.closest('.category-row');
   if (!row || !row.dataset.category) return;
-  setCategoryFilter(row.dataset.category);
+  setCategoryFilter(row.dataset.category, null, TX_EXPENSE);
 });
 
 document.getElementById('categoryFilterClear').addEventListener('click', () => {
@@ -2357,9 +2392,6 @@ const CATEGORY_ALIASES = {
   'Konto Übertragung': ['uebertrag', 'uebertragung', 'transfer', 'umbuchung', 'konto'],
   'Noch auszuwählen': ['offen', 'unklar', 'unbekannt', 'rest', 'noch offen'],
   'Lohn': ['salaer', 'salär', 'gehalt', 'einkommen', 'income', 'bonus', 'einnahmen'],
-  'Spesen': ['speseneinnahmen', 'fixe speseneinnahmen', 'spesenausgaben'],
-  'Geld erhalten': ['gutschrift', 'erhalten'],
-  'Rückerstattung': ['rueckerstattung', 'rueckzahlung', 'refund'],
 };
 
 function mapFileCategory(raw) {
@@ -3233,7 +3265,8 @@ function selectTransactions(text) {
     parts.push(formatMonthLabel(currentMonth));
   }
 
-  return { list: list.sort(compareChronological), label: parts.join(' · '), category, month, year };
+  const type = wantIncome && !wantExpense ? TX_INCOME : (wantExpense && !wantIncome ? TX_EXPENSE : null);
+  return { list: list.sort(compareChronological), label: parts.join(' · '), category, month, year, type };
 }
 
 // ---- Befehle erkennen -------------------------------------------------------
@@ -3317,7 +3350,7 @@ function runAssistantCommand(cmd) {
         : (sel.month
             ? { from: `${sel.month}-01`, to: `${sel.month}-31`, label: formatMonthLabel(sel.month) }
             : null);
-      setCategoryFilter(sel.category, bounds);
+      setCategoryFilter(sel.category, bounds, sel.type);
       return sel.list.length
         ? `${sel.category}: ${plural(sel.list.length, 'Eintrag', 'Einträge')} über ${formatCurrency(sumAmounts(sel.list))} (${bounds ? bounds.label : formatMonthLabel(currentMonth)}).`
         : `Für ${sel.category} finde ich in diesem Zeitraum keine Einträge.`;
@@ -4180,8 +4213,8 @@ function importBackup(file) {
 
     transactions = migrateTransactions(data.transactions);
     goals = data.goals && typeof data.goals === 'object' ? data.goals : { overall: null, categories: {} };
-    learnedRules = data.learnedRules && typeof data.learnedRules === 'object' ? data.learnedRules : {};
-    patterns = data.patterns && typeof data.patterns === 'object' ? data.patterns : {};
+    learnedRules = dropRetiredCategories(data.learnedRules && typeof data.learnedRules === 'object' ? data.learnedRules : {});
+    patterns = dropRetiredCategories(data.patterns && typeof data.patterns === 'object' ? data.patterns : {});
     balances = data.balances && typeof data.balances === 'object' ? data.balances : {};
     importLog = data.importLog && typeof data.importLog === 'object' ? data.importLog : {};
     teachChatHistory = Array.isArray(data.teachChatHistory) ? data.teachChatHistory : [];
